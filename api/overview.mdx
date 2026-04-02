@@ -1,0 +1,126 @@
+---
+title: "API overview"
+description: "Overview of the zot OCI Distribution Specification API, authentication methods, and common response codes."
+---
+
+zot implements the [OCI Distribution Specification v1.1](https://github.com/opencontainers/distribution-spec/blob/main/spec.md) in full, providing a standards-compliant HTTP API for pushing, pulling, and managing container images and OCI artifacts.
+
+## Base URL
+
+All API endpoints are prefixed with `/v2/`:
+
+```
+http(s)://{host}:{port}/v2/
+```
+
+For example, if your registry is running on `registry.example.com` port `5000` with TLS:
+
+```
+https://registry.example.com:5000/v2/
+```
+
+## API availability check
+
+To confirm the registry is reachable and the v2 API is supported, send a `GET` request to the root endpoint. A `200` response confirms the API is available. A `401` response means the registry requires authentication.
+
+```bash
+curl -I https://registry.example.com:5000/v2/
+```
+
+A successful response includes the `Docker-Distribution-API-Version` header:
+
+```
+HTTP/1.1 200 OK
+Docker-Distribution-API-Version: registry/2.0
+Content-Type: application/json
+```
+
+## Authentication
+
+zot supports multiple authentication methods. The method in use is advertised via the `WWW-Authenticate` header on `401` responses.
+
+### Basic authentication (htpasswd / LDAP)
+
+When basic auth is configured, include an `Authorization: Basic` header with a base64-encoded `username:password` string.
+
+```bash
+curl -u username:password https://registry.example.com:5000/v2/
+```
+
+Credentials are validated against an htpasswd file or an LDAP directory, depending on the server configuration.
+
+### Bearer token authentication
+
+When bearer auth is configured, the registry returns a `WWW-Authenticate: Bearer` header containing a `realm` URL and a `service` name. Obtain a token from the realm URL, then include it as a `Bearer` token.
+
+```bash
+# 1. Get a token from the auth server
+TOKEN=$(curl -s "https://auth.example.com/token?service=registry&scope=repository:myimage:pull" \
+  -u username:password | jq -r .token)
+
+# 2. Use the token in subsequent requests
+curl -H "Authorization: Bearer $TOKEN" \
+  https://registry.example.com:5000/v2/myimage/manifests/latest
+```
+
+### API key authentication
+
+zot supports API keys as an alternative to passwords. API keys use the `zak_` prefix and are passed as the password in HTTP basic auth.
+
+```bash
+curl -u username:zak_your_api_key https://registry.example.com:5000/v2/
+```
+
+API keys can be created and revoked at `/zot/auth/apikey`.
+
+### Anonymous access
+
+When no authentication is configured or when a repository is accessible without credentials, requests can be made without an `Authorization` header. The registry will enforce any configured anonymous access policies.
+
+## Common response codes
+
+| Code | Meaning | When it occurs |
+|------|---------|----------------|
+| `200` | OK | Request succeeded; body contains the requested data. |
+| `201` | Created | Resource was successfully created (e.g., manifest or blob pushed). |
+| `202` | Accepted | Request accepted for processing (e.g., blob upload initiated or blob deleted). |
+| `204` | No Content | Success with no body (e.g., blob upload status check). |
+| `400` | Bad Request | Malformed request, invalid digest, or invalid parameters. |
+| `401` | Unauthorized | No credentials provided or credentials are invalid. |
+| `403` | Forbidden | Credentials are valid but the user lacks permission for the action. |
+| `404` | Not Found | The requested repository, manifest, or blob does not exist. |
+| `405` | Method Not Allowed | The HTTP method is not supported for this endpoint. |
+| `409` | Conflict | A conflict occurred (e.g., attempting to delete a manifest referenced by an index). |
+| `416` | Range Not Satisfiable | The byte range requested for a blob chunk upload is invalid. |
+| `500` | Internal Server Error | An unexpected error occurred on the server. |
+
+<Note>
+Error responses from zot follow the OCI Distribution Specification error format. The body is a JSON object with an `errors` array, each containing a `code`, `message`, and optional `detail` field.
+</Note>
+
+```json
+{
+  "errors": [
+    {
+      "code": "MANIFEST_UNKNOWN",
+      "message": "manifest unknown",
+      "detail": {
+        "reference": "sha256:abc123..."
+      }
+    }
+  ]
+}
+```
+
+## Available API endpoint groups
+
+| Group | Description |
+|-------|-------------|
+| [Repositories](/api/repositories) | List all repositories and tags. |
+| [Manifests](/api/manifests) | Pull, push, check, and delete image manifests. |
+| [Blobs](/api/blobs) | Download, upload, and delete content-addressed blobs. |
+| [Search API](/api/search-api) | GraphQL search and CVE scanning (zot extension). |
+
+<Info>
+In addition to the OCI Distribution Spec endpoints, zot exposes extension endpoints under `/v2/_zot/ext/` for search, image trust (cosign/notation), server management, and user preferences. The `/v2/_oci/ext/discover` endpoint lists all active extensions.
+</Info>

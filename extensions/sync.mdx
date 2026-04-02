@@ -1,0 +1,326 @@
+---
+title: "Registry sync"
+description: "Mirror images from upstream registries into zot on demand or on a scheduled poll interval."
+keywords: ["sync", "mirror", "registry", "replication", "on-demand", "poll", "TLS", "credentials"]
+---
+
+The sync extension lets zot pull images from one or more upstream registries. You can choose between two modes:
+
+- **On demand**: zot fetches an image from the upstream registry the first time a client requests it, then caches it locally for subsequent requests.
+- **Scheduled (poll)**: zot periodically crawls the upstream registry and copies all matching images regardless of client activity.
+
+Both modes can be active for the same upstream registry at the same time.
+
+## Enabling sync
+
+Sync is compiled in using the `sync` build tag. In the configuration file, add the `sync` block under `extensions`:
+
+```json
+{
+  "extensions": {
+    "sync": {
+      "enable": true,
+      "credentialsFile": "/etc/zot/sync-credentials.json",
+      "registries": []
+    }
+  }
+}
+```
+
+If `registries` contains at least one entry, the extension is enabled even without `"enable": true`.
+
+## Configuration reference
+
+<ParamField path="extensions.sync.enable" type="boolean">
+  Explicitly enable or disable the sync extension. Defaults to `true` when `registries` is non-empty.
+</ParamField>
+
+<ParamField path="extensions.sync.credentialsFile" type="string">
+  Path to a JSON file containing per-registry credentials. See [Credentials](#credentials) for the file format.
+</ParamField>
+
+<ParamField path="extensions.sync.downloadDir" type="string">
+  Temporary directory used when syncing to cloud-backed storage (S3, GCS). zot copies images here as an OCI layout first, then moves them into the storage backend. Not needed for local filesystem storage.
+</ParamField>
+
+<ParamField path="extensions.sync.registries" type="array" required>
+  List of upstream registry configurations.
+</ParamField>
+
+### Registry configuration
+
+Each entry in `registries` configures one upstream source:
+
+<ParamField path="urls" type="array" required>
+  One or more URLs for the upstream registry. zot tries them in order when a request fails. Self-referential URLs (where the hostname resolves to the local instance) are automatically removed at startup.
+</ParamField>
+
+<ParamField path="onDemand" type="boolean" default="false">
+  When `true`, zot transparently proxies image pulls to the upstream registry and caches the result locally.
+</ParamField>
+
+<ParamField path="pollInterval" type="string">
+  How often to run a full scheduled sync. Accepts Go duration strings: `"6h"`, `"30m"`, `"24h"`. Required for scheduled sync. Must be used together with `content`.
+</ParamField>
+
+<ParamField path="content" type="array">
+  List of content rules that filter which repositories and tags are copied during scheduled sync. If omitted, no scheduled sync runs even if `pollInterval` is set.
+</ParamField>
+
+<ParamField path="tlsVerify" type="boolean" default="true">
+  Whether to verify the upstream registry's TLS certificate. Set to `false` for self-signed certs in development.
+</ParamField>
+
+<ParamField path="certDir" type="string">
+  Path to a directory of PEM-encoded CA certificates to trust when connecting to the upstream registry.
+</ParamField>
+
+<ParamField path="maxRetries" type="integer">
+  Number of times to retry a failed image pull before giving up.
+</ParamField>
+
+<ParamField path="retryDelay" type="string">
+  Time to wait between retries. Accepts Go duration strings: `"15m"`, `"30s"`.
+</ParamField>
+
+<ParamField path="onlySigned" type="boolean">
+  When `true`, only images with at least one valid signature (Cosign or Notation) are synced.
+</ParamField>
+
+<ParamField path="syncLegacyCosignTags" type="boolean" default="true">
+  Whether to sync legacy Cosign tags (e.g., `sha256-<digest>.sig`, `sha256-<digest>.sbom`). Defaults to `true`.
+</ParamField>
+
+<ParamField path="preserveDigest" type="boolean" default="false">
+  When `true`, zot syncs images without converting Docker manifest format to OCI, preserving the original digest.
+</ParamField>
+
+<ParamField path="syncTimeout" type="string">
+  Overall HTTP client timeout for all sync operations against this registry. Accepts Go duration strings: `"10m"`.
+</ParamField>
+
+<ParamField path="credentialHelper" type="string">
+  Name of an external credential helper binary (e.g., `"ecr-login"`) to obtain temporary tokens for cloud registries. The binary must be on `PATH` and follow the Docker credential helper protocol.
+</ParamField>
+
+### Content rules
+
+Content rules control which repositories and tags are included in a scheduled sync:
+
+<ParamField path="prefix" type="string" required>
+  Repository path prefix to match on the upstream registry. Use `**` as a glob to match all repositories, or `/org/**` to match all repos under an organization.
+</ParamField>
+
+<ParamField path="destination" type="string">
+  Local path where matched images are stored. Defaults to the same path as the upstream prefix.
+</ParamField>
+
+<ParamField path="stripPrefix" type="boolean" default="false">
+  When `true`, the `prefix` path is removed when storing the image locally. For example, with prefix `/repo2/repo` and destination `/repo` and `stripPrefix: true`, upstream `/repo2/repo:tag` is stored as `/repo:tag`.
+</ParamField>
+
+<ParamField path="tags.regex" type="string">
+  Only sync tags matching this regular expression. Example: `"4.*"` syncs all tags starting with `4`.
+</ParamField>
+
+<ParamField path="tags.excludeRegex" type="string">
+  Exclude tags matching this regular expression. Example: `".*-(amd64|arm64)$"` excludes architecture-specific tags.
+</ParamField>
+
+<ParamField path="tags.semver" type="boolean">
+  When `true`, only sync tags that are valid semantic version strings (e.g., `v1.2.3`).
+</ParamField>
+
+## On-demand vs scheduled sync
+
+<Tabs>
+  <Tab title="On-demand sync">
+    On-demand sync acts as a transparent pull-through cache. When a client requests an image that is not yet in zot, the registry fetches it from the upstream source, stores it locally, and serves it to the client. Subsequent requests are served from the local cache.
+
+    ```json
+    {
+      "extensions": {
+        "sync": {
+          "enable": true,
+          "registries": [
+            {
+              "urls": ["https://index.docker.io"],
+              "onDemand": true,
+              "tlsVerify": true,
+              "maxRetries": 5,
+              "retryDelay": "30s",
+              "syncTimeout": "10m"
+            }
+          ]
+        }
+      }
+    }
+    ```
+
+    With this configuration, `docker pull <zot-host>/library/ubuntu:22.04` transparently fetches `ubuntu:22.04` from Docker Hub and caches it locally.
+  </Tab>
+  <Tab title="Scheduled sync">
+    Scheduled sync runs at a fixed interval and copies all images matching the content rules from the upstream registry into local storage. This is useful for air-gapped environments or when you want to guarantee that a set of images is always available locally.
+
+    ```json
+    {
+      "extensions": {
+        "sync": {
+          "enable": true,
+          "registries": [
+            {
+              "urls": ["https://registry1.example.com:5000"],
+              "pollInterval": "6h",
+              "tlsVerify": true,
+              "maxRetries": 3,
+              "retryDelay": "5m",
+              "content": [
+                {
+                  "prefix": "/repo1/repo",
+                  "tags": {
+                    "regex": "4.*",
+                    "semver": true
+                  }
+                },
+                {
+                  "prefix": "/repo2/repo",
+                  "destination": "/repo",
+                  "stripPrefix": true
+                },
+                {
+                  "prefix": "/repo3/**"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+    ```
+
+    This configuration syncs every six hours, pulling only tags that start with `4` and are valid semver from `/repo1/repo`, remapping `/repo2/repo` to `/repo`, and copying all tags from all repos under `/repo3/`.
+  </Tab>
+</Tabs>
+
+## Full configuration example
+
+The following example mirrors the `config-sync.json` from the zot repository and demonstrates on-demand and scheduled sync together, with multiple upstream registries:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/tmp/zot"
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "8080"
+  },
+  "log": {
+    "level": "debug"
+  },
+  "extensions": {
+    "sync": {
+      "enable": true,
+      "credentialsFile": "./examples/sync-auth-filepath.json",
+      "registries": [
+        {
+          "urls": ["https://registry1:5000"],
+          "onDemand": false,
+          "pollInterval": "6h",
+          "tlsVerify": true,
+          "certDir": "/home/user/certs",
+          "maxRetries": 3,
+          "retryDelay": "5m",
+          "onlySigned": true,
+          "content": [
+            {
+              "prefix": "/repo1/repo",
+              "tags": {
+                "regex": "4.*",
+                "semver": true
+              }
+            },
+            {
+              "prefix": "/repo2/repo",
+              "destination": "/repo",
+              "stripPrefix": true
+            },
+            {
+              "prefix": "/repo3/**"
+            },
+            {
+              "prefix": "/repo4/**",
+              "tags": {
+                "excludeRegex": ".*-(amd64|arm64)$"
+              }
+            }
+          ]
+        },
+        {
+          "urls": [
+            "https://registry2:5000",
+            "https://registry3:5000"
+          ],
+          "pollInterval": "12h",
+          "tlsVerify": false,
+          "onDemand": false,
+          "content": [
+            {
+              "prefix": "**",
+              "tags": {
+                "semver": true
+              }
+            }
+          ]
+        },
+        {
+          "urls": ["https://index.docker.io"],
+          "onDemand": true,
+          "tlsVerify": true,
+          "maxRetries": 5,
+          "retryDelay": "30s",
+          "syncTimeout": "10m"
+        }
+      ]
+    }
+  }
+}
+```
+
+## Credentials
+
+The `credentialsFile` is a JSON map where each key is a registry address (host and optional port) and each value contains a username and password:
+
+```json
+{
+  "127.0.0.1:8080": {
+    "username": "user",
+    "password": "pass"
+  },
+  "registry2:5000": {
+    "username": "user2",
+    "password": "pass2"
+  }
+}
+```
+
+For cloud registries that issue short-lived tokens (ECR, GCR, ACR), use `credentialHelper` instead of static credentials:
+
+```json
+{
+  "registries": [
+    {
+      "urls": ["https://123456789.dkr.ecr.us-east-1.amazonaws.com"],
+      "onDemand": true,
+      "credentialHelper": "ecr-login"
+    }
+  ]
+}
+```
+
+The credential helper binary (`docker-credential-ecr-login`) must be installed and available on `PATH`.
+
+## Self-referential URL handling
+
+If a registry entry includes a URL that resolves to the local zot instance itself (by IP or hostname), zot automatically removes it from the list at startup to prevent sync loops. A warning is logged when this happens. If removing self-referential URLs leaves a registry with zero URLs, startup fails with an error.

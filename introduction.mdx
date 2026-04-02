@@ -1,0 +1,96 @@
+---
+title: "Introduction"
+description: "zot is a production-ready, vendor-neutral OCI-native container image and artifact registry."
+---
+
+zot is an open source container image registry that stores images in [OCI Image Layout](https://github.com/opencontainers/image-spec) format and communicates exclusively using the [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec) on the wire. No proprietary extensions, no vendor lock-in — just OCI, end to end.
+
+## What is OCI?
+
+The [Open Container Initiative (OCI)](https://opencontainers.org) maintains two specifications that govern how containers are stored and distributed:
+
+- **OCI Image Spec** — defines how a container image is laid out on disk, including layers, manifests, and configuration.
+- **OCI Distribution Spec** — defines the HTTP API that registries expose for pushing and pulling images.
+
+zot is fully conformant with OCI Distribution Specification v1.1.1 and stores every image directly in the OCI Image Layout format. This means your data is always portable: you can move your storage root to any other OCI-conformant tool without conversion.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="OCI-native storage" icon="hard-drive">
+    Images are stored on disk in the OCI Image Layout format. No proprietary database or index — just standard OCI blobs, manifests, and indexes.
+  </Card>
+  <Card title="Flexible storage backends" icon="database">
+    Use the local filesystem, Amazon S3, or Google Cloud Storage. Sub-paths let you spread repositories across different backends in a single instance.
+  </Card>
+  <Card title="Multiple auth methods" icon="lock">
+    htpasswd, LDAP, OpenID Connect (Google, GitLab, generic OIDC), OAuth2 (GitHub), mutual TLS (mTLS), bearer tokens, and API keys.
+  </Card>
+  <Card title="Fine-grained authorization" icon="shield-halved">
+    Repository-level access control policies with user groups, default policies, and anonymous access support.
+  </Card>
+  <Card title="Registry sync" icon="arrows-rotate">
+    Mirror repositories from upstream registries on a schedule or on demand, with tag filtering, regex matching, and retry support.
+  </Card>
+  <Card title="CVE scanning" icon="bug">
+    Built-in vulnerability scanning powered by [Trivy](https://github.com/aquasecurity/trivy) via the search extension. Results are queryable through the GraphQL API.
+  </Card>
+  <Card title="Prometheus metrics" icon="chart-line">
+    Expose registry metrics at a configurable `/metrics` endpoint. A standalone exporter (`zxp`) is also available for minimal builds.
+  </Card>
+  <Card title="Horizontal clustering" icon="server">
+    Scale out across multiple nodes using a shared object store and Redis for distributed session management and metadata caching.
+  </Card>
+</CardGroup>
+
+## Binary types
+
+zot ships two binary variants:
+
+| Variant | Description |
+|---------|-------------|
+| **Full** (`zot-linux-amd64`) | Includes all extensions: search, sync, metrics, lint, UI, image trust, scrub, user preferences, and events. |
+| **Minimal** (`zot-linux-amd64-minimal`) | Core OCI registry only, no extensions. Smaller footprint for constrained environments. |
+
+The full binary is built with Go build tags corresponding to each extension (`search`, `sync`, `metrics`, `lint`, `ui`, `imagetrust`, `scrub`, `userprefs`, `events`). You can also build a custom binary with only the extensions you need.
+
+## Configuration overview
+
+zot is configured with a single JSON or YAML file. Every configuration has four required top-level sections:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+Extensions are enabled under the optional `extensions` key. Authentication is configured under `http.auth`, and access control policies go under `http.accessControl`.
+
+## Tools
+
+zot ships with companion tools in the same release:
+
+- **`zli`** — a CLI client for interacting with a zot registry (searching images, managing repositories, handling API keys).
+- **`zb`** — a benchmarking tool for load-testing a registry.
+- **`zxp`** — a standalone Prometheus metrics exporter for use with the minimal build.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run zot with Docker or a binary and push your first image in under five minutes.
+  </Card>
+  <Card title="Installation" icon="download" href="/install">
+    All installation methods: Docker, pre-built binary, build from source, and Helm.
+  </Card>
+</CardGroup>

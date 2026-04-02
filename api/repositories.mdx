@@ -1,0 +1,161 @@
+---
+title: "Repositories"
+description: "List repositories and tags in the zot OCI registry."
+---
+
+These endpoints follow the OCI Distribution Specification for listing repositories and image tags.
+
+---
+
+## List repositories
+
+<ParamField query="n" type="integer">
+  Maximum number of repositories to return. When omitted, all repositories are returned. Use with `last` for cursor-based pagination.
+</ParamField>
+
+<ParamField query="last" type="string">
+  Return repositories lexicographically after this name. Used as a pagination cursor with `n`.
+</ParamField>
+
+```
+GET /v2/_catalog
+```
+
+Returns the list of repositories hosted by this registry.
+
+When the result set is paginated, the response includes a `Link` header pointing to the next page:
+
+```
+Link: </v2/_catalog?n=100&last=myrepo>; rel="next"
+```
+
+### Response
+
+<ResponseField name="repositories" type="string[]">
+  Alphabetically sorted list of repository names.
+</ResponseField>
+
+```json
+{
+  "repositories": [
+    "library/alpine",
+    "library/nginx",
+    "myorg/myapp"
+  ]
+}
+```
+
+### Examples
+
+<CodeGroup>
+
+```bash List all repositories
+curl https://registry.example.com:5000/v2/_catalog
+```
+
+```bash Paginate (first 10)
+curl "https://registry.example.com:5000/v2/_catalog?n=10"
+```
+
+```bash Paginate (next page, continuing after "library/nginx")
+curl "https://registry.example.com:5000/v2/_catalog?n=10&last=library/nginx"
+```
+
+```bash With authentication
+curl -u username:password \
+  "https://registry.example.com:5000/v2/_catalog?n=50"
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Success. Body contains the repository list. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `500` | Internal server error. |
+
+---
+
+## List tags for a repository
+
+<ParamField path="name" type="string" required>
+  The name of the repository. May contain slashes for namespaced repositories (e.g., `myorg/myapp`).
+</ParamField>
+
+<ParamField query="n" type="integer">
+  Maximum number of tags to return. When omitted, all tags are returned.
+</ParamField>
+
+<ParamField query="last" type="string">
+  Return tags lexicographically after this value. Used as a pagination cursor with `n`.
+</ParamField>
+
+```
+GET /v2/<name>/tags/list
+```
+
+Returns the sorted list of tags for the specified repository. Tags are sorted alphabetically.
+
+When the result set is paginated, the response includes a `Link` header:
+
+```
+Link: </v2/myorg/myapp/tags/list?n=10&last=v1.2.0>; rel="next"
+```
+
+### Response
+
+<ResponseField name="name" type="string">
+  The repository name.
+</ResponseField>
+
+<ResponseField name="tags" type="string[]">
+  Alphabetically sorted list of tags in the repository.
+</ResponseField>
+
+```json
+{
+  "name": "myorg/myapp",
+  "tags": [
+    "latest",
+    "v1.0.0",
+    "v1.1.0",
+    "v1.2.0"
+  ]
+}
+```
+
+### Examples
+
+<CodeGroup>
+
+```bash List all tags
+curl https://registry.example.com:5000/v2/myorg/myapp/tags/list
+```
+
+```bash Paginate (first 5 tags)
+curl "https://registry.example.com:5000/v2/myorg/myapp/tags/list?n=5"
+```
+
+```bash Paginate (next page, continuing after "v1.0.0")
+curl "https://registry.example.com:5000/v2/myorg/myapp/tags/list?n=5&last=v1.0.0"
+```
+
+```bash With authentication
+curl -u username:password \
+  https://registry.example.com:5000/v2/myorg/myapp/tags/list
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Success. Body contains the tag list. |
+| `400` | Bad request (e.g., invalid value for `n`). |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository not found. |

@@ -1,0 +1,286 @@
+---
+title: "Garbage collection"
+description: "Remove unreferenced blobs and manifests, enforce image retention policies, and maintain storage integrity with zot's built-in GC."
+---
+
+Garbage collection (GC) in zot reclaims storage space by deleting blobs and manifests that are no longer referenced by any image tag or index. It also enforces image retention policies that limit which tags are kept per repository.
+
+## What GC removes
+
+Each GC run on a repository performs the following steps in order:
+
+1. **Tag retention** — applies `RetentionPolicy` rules to untag images that do not match the keep criteria (pattern, push age, pull age, or count limits).
+2. **Referrer cleanup** — removes OCI referrer manifests (e.g., cosign signatures, SBOMs) whose subject manifest no longer exists in the repository's `index.json`.
+3. **Untagged manifest cleanup** — removes manifests that have no tag and are not referenced by a multi-arch image index.
+4. **Unreferenced blob cleanup** — deletes layer blobs, config blobs, and manifest blobs that are not referenced by any remaining manifest, subject to the `GCDelay`.
+5. **Stale blob upload cleanup** — removes incomplete chunked uploads that have not been updated within the `GCDelay` window.
+
+<Note>
+Blobs are only deleted if their modification time is older than `GCDelay`. This grace period prevents GC from interfering with an active push that has not yet committed its manifest.
+</Note>
+
+## GC configuration fields
+
+These fields are set inside the `storage` block (or any `subPaths` entry):
+
+<ParamField path="storage.gc" type="boolean">
+  Enable garbage collection. Defaults to `true`.
+</ParamField>
+
+<ParamField path="storage.gcDelay" type="duration string">
+  Minimum age a blob must reach before it can be deleted. Expressed as a Go duration string (e.g., `"1h"`, `"2h"`, `"30m"`). Defaults to `1h`. Applied to unreferenced blobs and stale blob uploads.
+</ParamField>
+
+<ParamField path="storage.gcInterval" type="duration string">
+  How often the periodic GC scheduler runs a full sweep over all repositories. Expressed as a Go duration string. Defaults to `1h`. Set this to `"0"` to disable periodic GC (event-driven GC will still run after each push).
+</ParamField>
+
+## Event-driven vs. periodic GC
+
+zot runs GC in two modes simultaneously:
+
+| Mode | When it runs | What triggers it |
+|---|---|---|
+| Event-driven | Immediately after a manifest push completes | OCI push workflow |
+| Periodic | On a configurable interval (`gcInterval`) | Internal task scheduler |
+
+Event-driven GC keeps the repository clean after every write. Periodic GC catches anything that falls through — for example, orphaned blobs left after a failed push or referrers added out of order.
+
+## Basic GC configuration
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "gc": true,
+    "gcDelay": "2h",
+    "gcInterval": "1h"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+## GC with storage sub-paths
+
+When using sub-paths, each sub-path can have its own `gc`, `gcDelay`, and `gcInterval` settings:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "1h",
+    "subPaths": {
+      "/a": {
+        "rootDirectory": "/var/lib/registry-a",
+        "gc": true,
+        "gcDelay": "1h",
+        "gcInterval": "1h"
+      }
+    }
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+## Image retention policies
+
+Retention policies let you define which tags to keep per repository. Tags that do not match any keep rule are untagged (and their blobs become eligible for GC). Retention runs as part of every GC cycle.
+
+Retention policies require the search extension (`extensions.search`) to be enabled, because zot uses its metadata database to track pull timestamps.
+
+### Retention configuration fields
+
+<ParamField path="storage.retention.dryRun" type="boolean">
+  When `true`, zot logs which tags would be deleted but does not actually remove them. Use this to preview the effect of a policy before enabling it in production. Defaults to `false`.
+</ParamField>
+
+<ParamField path="storage.retention.delay" type="duration string">
+  Grace period applied to referrers and untagged manifests before deletion. Defaults to `24h`.
+</ParamField>
+
+<ParamField path="storage.retention.policies" type="array">
+  List of `RetentionPolicy` objects. Policies are evaluated in order; the first policy whose `repositories` glob matches a repo applies to that repo.
+</ParamField>
+
+### RetentionPolicy fields
+
+<ParamField path="repositories" type="array of glob strings" required>
+  List of glob patterns that match repository names (e.g., `"infra/*"`, `"**"`).
+</ParamField>
+
+<ParamField path="deleteReferrers" type="boolean">
+  When `true`, remove referrer manifests (cosign signatures, SBOMs, etc.) whose subject no longer exists.
+</ParamField>
+
+<ParamField path="deleteUntagged" type="boolean">
+  When `true`, remove manifests that have no tag.
+</ParamField>
+
+<ParamField path="keepTags" type="array of KeepTagsPolicy">
+  Rules that define which tags to keep. A tag is retained if it matches **any** `keepTags` rule.
+</ParamField>
+
+### KeepTagsPolicy fields
+
+<ParamField path="patterns" type="array of regex strings">
+  Regular expressions matched against tag names. Tags matching any pattern are kept regardless of age or count limits.
+</ParamField>
+
+<ParamField path="pulledWithin" type="duration string">
+  Keep a tag if it was pulled within this window (e.g., `"168h"` = 7 days).
+</ParamField>
+
+<ParamField path="pushedWithin" type="duration string">
+  Keep a tag if it was pushed within this window.
+</ParamField>
+
+<ParamField path="mostRecentlyPushedCount" type="integer">
+  Keep the N most recently pushed tags.
+</ParamField>
+
+<ParamField path="mostRecentlyPulledCount" type="integer">
+  Keep the N most recently pulled tags.
+</ParamField>
+
+### Retention policy example
+
+The following configuration demonstrates a tiered retention strategy:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry",
+    "gc": true,
+    "gcDelay": "2h",
+    "gcInterval": "1h",
+    "retention": {
+      "dryRun": false,
+      "delay": "24h",
+      "policies": [
+        {
+          "repositories": ["infra/*", "prod/*"],
+          "deleteReferrers": false,
+          "keepTags": [
+            {
+              "patterns": ["v2.*", ".*-prod"]
+            },
+            {
+              "patterns": ["v3.*", ".*-prod"],
+              "pulledWithin": "168h"
+            }
+          ]
+        },
+        {
+          "repositories": ["tmp/**"],
+          "deleteReferrers": true,
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "patterns": ["v1.*"],
+              "pulledWithin": "168h",
+              "pushedWithin": "168h"
+            }
+          ]
+        },
+        {
+          "repositories": ["**"],
+          "deleteReferrers": true,
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "mostRecentlyPushedCount": 10,
+              "mostRecentlyPulledCount": 10,
+              "pulledWithin": "720h",
+              "pushedWithin": "720h"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+**Policy breakdown:**
+
+- `infra/*` and `prod/*` — keep all tags matching `v2.*` or `.*-prod` unconditionally; also keep `v3.*` or `.*-prod` tags pulled within the last 7 days.
+- `tmp/**` — keep only `v1.*` tags pushed or pulled within 7 days; delete all referrers and untagged images.
+- `**` (catch-all) — for all other repos, keep the 10 most recently pushed and 10 most recently pulled tags, as long as they were pushed or pulled within the last 30 days.
+
+### Using dry run mode
+
+Before applying a new retention policy in production, preview its effects without deleting anything:
+
+```json
+"retention": {
+  "dryRun": true,
+  "policies": [ ... ]
+}
+```
+
+When `dryRun` is `true`, zot logs each tag it *would* delete at `info` level with the fields `"dry-run": true` and `"decision": "delete"`. Inspect the logs to confirm the policy matches your intent, then set `dryRun` to `false`.
+
+## Scrub extension
+
+The scrub extension performs periodic data integrity checks by reading each stored blob and verifying its digest. This detects silent corruption that GC alone cannot find.
+
+```json
+{
+  "extensions": {
+    "scrub": {
+      "enable": true,
+      "interval": "24h"
+    }
+  }
+}
+```
+
+<ParamField path="extensions.scrub.enable" type="boolean">
+  Enable the scrub extension.
+</ParamField>
+
+<ParamField path="extensions.scrub.interval" type="duration string">
+  How often to run a full integrity scan. A value of `"24h"` means one complete scan per day.
+</ParamField>
+
+<Warning>
+Scrubbing reads every blob in storage. On large registries with slow backing storage, the scrub interval should be set long enough that one scan completes before the next begins.
+</Warning>
+
+## Task scheduler
+
+GC runs through zot's internal task scheduler. You can control how many workers the scheduler uses, which affects how much I/O GC generates concurrently:
+
+```json
+{
+  "scheduler": {
+    "numWorkers": 3
+  }
+}
+```
+
+Increasing `numWorkers` speeds up GC on large registries at the cost of higher concurrent I/O. The default is sufficient for most deployments.

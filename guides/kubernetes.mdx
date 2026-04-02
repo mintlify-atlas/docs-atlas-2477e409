@@ -1,0 +1,496 @@
+---
+title: "Deploying on Kubernetes"
+description: "Deploy zot on Kubernetes using Helm or raw manifests, with persistent storage and cloud backends."
+---
+
+zot runs well on Kubernetes. This guide covers Helm-based deployment, raw manifest examples, persistent storage configuration, and how to use cloud storage backends inside a cluster.
+
+## Prerequisites
+
+- A running Kubernetes cluster (v1.24 or later)
+- `kubectl` configured to access your cluster
+- Helm 3 installed (for the Helm path)
+
+---
+
+## Deploy with Helm
+
+The official zot Helm chart is hosted at `zotregistry.dev`.
+
+<Steps>
+  <Step title="Add the Helm repository">
+    ```bash
+    helm repo add zot https://zotregistry.dev/helm-charts
+    helm repo update
+    ```
+  </Step>
+
+  <Step title="Install zot">
+    Install with default values, which deploys a single replica with a 10Gi PersistentVolumeClaim backed by the default StorageClass.
+
+    ```bash
+    helm install zot zot/zot \
+      --namespace zot \
+      --create-namespace
+    ```
+  </Step>
+
+  <Step title="Override values for production">
+    Create a `values.yaml` to customise resources, image tag, and ingress:
+
+    ```yaml
+    replicaCount: 1
+
+    image:
+      repository: ghcr.io/project-zot/zot-linux-amd64
+      tag: "latest"
+      pullPolicy: IfNotPresent
+
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "256Mi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"
+
+    persistence:
+      enabled: true
+      size: 50Gi
+      storageClass: "standard"
+
+    service:
+      type: ClusterIP
+      port: 5000
+
+    ingress:
+      enabled: true
+      className: nginx
+      hosts:
+        - host: registry.example.com
+          paths:
+            - path: /
+              pathType: Prefix
+      tls:
+        - secretName: registry-tls
+          hosts:
+            - registry.example.com
+    ```
+
+    Apply the override:
+
+    ```bash
+    helm install zot zot/zot \
+      --namespace zot \
+      --create-namespace \
+      -f values.yaml
+    ```
+  </Step>
+
+  <Step title="Verify the deployment">
+    ```bash
+    kubectl get pods -n zot
+    kubectl get svc -n zot
+    ```
+
+    You should see the zot pod in `Running` state and a `ClusterIP` service exposing port 5000.
+  </Step>
+</Steps>
+
+---
+
+## Deploy with raw Kubernetes manifests
+
+If you prefer to manage manifests directly, the following resources give you a minimal production-ready deployment.
+
+### ConfigMap
+
+Store the zot configuration in a ConfigMap so it can be mounted as a file.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zot-config
+  namespace: zot
+data:
+  config.json: |
+    {
+      "distSpecVersion": "1.1.1",
+      "storage": {
+        "rootDirectory": "/var/lib/zot"
+      },
+      "http": {
+        "address": "0.0.0.0",
+        "port": "5000"
+      },
+      "log": {
+        "level": "info"
+      }
+    }
+```
+
+### PersistentVolumeClaim
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zot-data
+  namespace: zot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: standard
+```
+
+<Note>
+  Use a storage class that supports `ReadWriteOnce`. For multi-replica deployments, use cloud object storage (S3 or GCS) instead of a PVC — see [Cloud storage backends](/guides/cloud-storage).
+</Note>
+
+### Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zot
+  namespace: zot
+  labels:
+    app: zot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zot
+  template:
+    metadata:
+      labels:
+        app: zot
+    spec:
+      containers:
+        - name: zot
+          image: ghcr.io/project-zot/zot-linux-amd64:latest
+          args: ["serve", "/etc/zot/config.json"]
+          ports:
+            - containerPort: 5000
+              name: http
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/zot
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/zot
+      volumes:
+        - name: config
+          configMap:
+            name: zot-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: zot-data
+```
+
+### Service
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: zot
+  namespace: zot
+spec:
+  selector:
+    app: zot
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP
+```
+
+Apply all resources:
+
+```bash
+kubectl apply -f configmap.yaml -f pvc.yaml -f deployment.yaml -f service.yaml
+```
+
+---
+
+## Resource recommendations
+
+| Workload | CPU request | CPU limit | Memory request | Memory limit |
+|---|---|---|---|---|
+| Small (dev/CI) | 100m | 500m | 128Mi | 512Mi |
+| Medium (team) | 250m | 1000m | 256Mi | 1Gi |
+| Large (production) | 500m | 2000m | 512Mi | 2Gi |
+
+For production deployments that handle large images or high concurrency, consider running zot with S3 or GCS storage so that the pod itself remains stateless.
+
+---
+
+## Local development with Kind
+
+[Kind](https://kind.sigs.k8s.io/) (Kubernetes in Docker) lets you run a local cluster for development and CI. The following script creates a Kind cluster with zot as the local registry, wires containerd to use it, and deploys a sample application.
+
+```bash
+#!/bin/sh
+set -o errexit
+
+# Create the zot registry container if it doesn't exist
+reg_name='kind-registry'
+reg_port='5001'
+if [ "$(docker inspect -f '{{.State.Running}}' "${reg_name}" 2>/dev/null || true)" != 'true' ]; then
+  docker run \
+    -d --restart=always -p "127.0.0.1:${reg_port}:5000" --name "${reg_name}" \
+    ghcr.io/project-zot/zot-minimal-linux-amd64:latest
+fi
+
+# Create a Kind cluster that mirrors localhost:5001 to the registry container
+cat <<EOF | kind create cluster --config=-
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:${reg_port}"]
+    endpoint = ["http://${reg_name}:5000"]
+EOF
+
+# Connect the registry container to the Kind network
+if [ "$(docker inspect -f='{{json .NetworkSettings.Networks.kind}}' "${reg_name}")" = 'null' ]; then
+  docker network connect "kind" "${reg_name}"
+fi
+
+# Advertise the registry to tools that understand the KEP-1755 ConfigMap
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-registry-hosting
+  namespace: kube-public
+data:
+  localRegistryHosting.v1: |
+    host: "localhost:${reg_port}"
+    help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
+EOF
+
+# Push an image to the local registry and deploy it
+skopeo copy --format=oci --dest-tls-verify=false \
+  docker://gcr.io/google-samples/hello-app:1.0 \
+  docker://localhost:5001/hello-app:1.0
+
+kubectl create deployment hello-server --image=localhost:5001/hello-app:1.0
+kubectl wait deployment -n default hello-server --for condition=Available=True --timeout=90s
+```
+
+The key pieces:
+
+- zot runs as a Docker container named `kind-registry` on port 5001.
+- The Kind cluster's containerd is patched to mirror `localhost:5001` to `http://kind-registry:5000` (the internal Docker network name).
+- A `ConfigMap` in `kube-public` advertises the registry to conformant tooling (see [KEP-1755](https://github.com/kubernetes/enhancements/tree/master/keps/sig-cluster-lifecycle/generic/1755-communicating-a-local-registry)).
+
+---
+
+## Cloud storage backends in Kubernetes
+
+When running zot in Kubernetes with cloud storage, make the zot pod stateless by pointing `storageDriver` at S3 or GCS. No PVC is needed — the pod can be restarted or rescheduled freely.
+
+<Tabs>
+  <Tab title="AWS S3">
+    Store AWS credentials in a Kubernetes Secret and inject them as environment variables.
+
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: zot-aws-credentials
+      namespace: zot
+    type: Opaque
+    stringData:
+      AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE"
+      AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+      AWS_REGION: "us-east-2"
+    ```
+
+    ConfigMap with the S3 storage driver and DynamoDB cache:
+
+    ```yaml
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: zot-config
+      namespace: zot
+    data:
+      config.json: |
+        {
+          "distSpecVersion": "1.1.1",
+          "storage": {
+            "rootDirectory": "/tmp/zot",
+            "dedupe": true,
+            "remoteCache": true,
+            "storageDriver": {
+              "name": "s3",
+              "rootdirectory": "/zot",
+              "region": "us-east-2",
+              "bucket": "zot-storage",
+              "forcepathstyle": true,
+              "secure": true,
+              "skipverify": false
+            },
+            "cacheDriver": {
+              "name": "dynamodb",
+              "region": "us-east-2",
+              "cacheTablename": "ZotBlobTable",
+              "repoMetaTablename": "ZotRepoMetadataTable",
+              "imageMetaTablename": "ZotImageMetaTable",
+              "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+              "userDataTablename": "ZotUserDataTable",
+              "apiKeyTablename": "ZotApiKeyTable",
+              "versionTablename": "ZotVersion"
+            }
+          },
+          "http": {
+            "address": "0.0.0.0",
+            "port": "5000"
+          },
+          "log": {
+            "level": "info"
+          }
+        }
+    ```
+
+    Reference the secret in your Deployment:
+
+    ```yaml
+    envFrom:
+      - secretRef:
+          name: zot-aws-credentials
+    ```
+
+    <Tip>
+      In production, use an IAM role attached to the pod's service account (IRSA) rather than long-lived access keys. Set `AWS_ROLE_ARN` and `AWS_WEB_IDENTITY_TOKEN_FILE` instead.
+    </Tip>
+  </Tab>
+
+  <Tab title="Google Cloud Storage">
+    Mount a GCS service account key as a secret:
+
+    ```bash
+    kubectl create secret generic zot-gcs-key \
+      --from-file=gcs-credentials.json=/path/to/service-account-key.json \
+      -n zot
+    ```
+
+    ConfigMap with the GCS storage driver:
+
+    ```yaml
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: zot-config
+      namespace: zot
+    data:
+      config.json: |
+        {
+          "storage": {
+            "rootDirectory": "/tmp/zot",
+            "dedupe": false,
+            "storageDriver": {
+              "name": "gcs",
+              "rootdirectory": "/zot",
+              "bucket": "zot-storage",
+              "credentialsFile": "/etc/gcs/gcs-credentials.json"
+            }
+          },
+          "http": {
+            "address": "0.0.0.0",
+            "port": "5000"
+          },
+          "log": {
+            "level": "info"
+          }
+        }
+    ```
+
+    Mount the secret into the pod:
+
+    ```yaml
+    volumeMounts:
+      - name: gcs-key
+        mountPath: /etc/gcs
+        readOnly: true
+    volumes:
+      - name: gcs-key
+        secret:
+          secretName: zot-gcs-key
+    ```
+
+    <Tip>
+      On GKE, use Workload Identity instead of a key file. Annotate the Kubernetes ServiceAccount with `iam.gke.io/gcp-service-account` and remove the `credentialsFile` from the config — the SDK picks up the workload identity token automatically.
+    </Tip>
+  </Tab>
+</Tabs>
+
+---
+
+## OIDC workload identity authentication
+
+zot supports Kubernetes ServiceAccount token authentication via OIDC bearer tokens. Pods can authenticate to the registry using their projected service account token without needing a password.
+
+The Kind OIDC workload identity example in the source repository (`examples/kind/kind-oidc-workload-identity.sh`) demonstrates the full setup: configuring zot with bearer OIDC auth, projecting a ServiceAccount token into a pod, and verifying that authentication and authorization work correctly.
+
+Key zot configuration for OIDC bearer auth:
+
+```json
+{
+  "http": {
+    "auth": {
+      "bearer": {
+        "realm": "zot",
+        "service": "zot-registry",
+        "oidc": [
+          {
+            "issuer": "https://<k8s-api-server>:6443",
+            "audiences": ["zot-registry"],
+            "certificateAuthorityFile": "/etc/zot/ca.pem"
+          }
+        ]
+      }
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["https://<issuer>/system:serviceaccount:<namespace>:<sa-name>"],
+              "actions": ["read", "create", "update"]
+            }
+          ],
+          "defaultPolicy": []
+        }
+      }
+    }
+  }
+}
+```

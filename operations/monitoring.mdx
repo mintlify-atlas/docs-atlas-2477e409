@@ -1,0 +1,282 @@
+---
+title: "Monitoring and health checks"
+description: "Monitor zot with Prometheus metrics, check instance health with built-in endpoints, configure structured logging, and apply rate limiting."
+---
+
+zot exposes health check endpoints for liveness probes, a Prometheus-compatible metrics endpoint for observability, and structured JSON logging with optional audit logging.
+
+<Tabs>
+  <Tab title="Health checks">
+
+## Health check endpoints
+
+zot provides three health check endpoints that return HTTP 200 when the instance is healthy:
+
+| Endpoint | Purpose |
+|---|---|
+| `/livez` | Liveness — the process is running |
+| `/readyz` | Readiness — the instance can serve traffic |
+| `/startupz` | Startup — the instance has completed initialization |
+
+All three endpoints are served on the same port as the registry API. No configuration is required to enable them.
+
+```bash
+# Check readiness
+curl -f http://localhost:5000/readyz
+
+# Check liveness
+curl -f http://localhost:5000/livez
+
+# Check startup
+curl -f http://localhost:5000/startupz
+```
+
+A 200 response body contains `{}`. A non-200 response indicates the instance is not healthy.
+
+### Kubernetes probe configuration
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /livez
+    port: 5000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 5000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+startupProbe:
+  httpGet:
+    path: /startupz
+    port: 5000
+  failureThreshold: 30
+  periodSeconds: 10
+```
+
+  </Tab>
+  <Tab title="Prometheus metrics">
+
+## Enabling the metrics endpoint
+
+The Prometheus metrics endpoint is provided by the `metrics` extension. Enable it in the `extensions` block:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  },
+  "extensions": {
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    }
+  }
+}
+```
+
+<ParamField path="extensions.metrics.enable" type="boolean" required>
+  Enable the metrics extension.
+</ParamField>
+
+<ParamField path="extensions.metrics.prometheus.path" type="string">
+  HTTP path where Prometheus metrics are served. Defaults to `"/metrics"`.
+</ParamField>
+
+Once enabled, the metrics endpoint is available at `http://localhost:5000/metrics`.
+
+## Restricting access to metrics
+
+By default, the `/metrics` endpoint is accessible to any authenticated user. You can restrict it to specific users with an access control rule:
+
+```json
+{
+  "http": {
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      }
+    },
+    "accessControl": {
+      "metrics": {
+        "users": ["prometheus"]
+      },
+      "repositories": {
+        "**": {
+          "anonymousPolicy": ["read"],
+          "defaultPolicy": ["read", "create"]
+        }
+      }
+    }
+  },
+  "extensions": {
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    }
+  }
+}
+```
+
+Only users listed in `accessControl.metrics.users` can scrape the metrics endpoint.
+
+## Available metrics
+
+All metrics use the `zot_` namespace prefix.
+
+| Metric | Type | Description |
+|---|---|---|
+| `zot_http_requests_total` | Counter | Total HTTP requests, labeled by `method` and `code` |
+| `zot_http_repo_latency_seconds` | Summary | Per-repository request latency, labeled by `repo` |
+| `zot_http_method_latency_seconds` | Histogram | Request latency by HTTP method |
+| `zot_repo_storage_bytes` | Gauge | Storage bytes used per repository |
+| `zot_repo_uploads_total` | Counter | Total image uploads per repository |
+| `zot_repo_downloads_total` | Counter | Total image downloads per repository |
+| `zot_info` | Gauge | Server build information (commit, binaryType, goVersion, version) |
+| `zot_storage_lock_latency_seconds` | Histogram | Storage lock acquisition latency, labeled by `storageName` and `lockType` |
+| `zot_scheduler_generators_total` | Counter | Total task generators registered in the scheduler |
+| `zot_scheduler_generators_status` | Gauge | Generator count by `priority` and `state` |
+| `zot_scheduler_workers_total` | Gauge | Total available scheduler workers |
+| `zot_scheduler_workers` | Gauge | Worker count by `state` |
+| `zot_scheduler_tasksqueue_length` | Gauge | Tasks waiting in the queue by `priority` |
+| `zot_scheduler_workers_tasks_duration_seconds` | Histogram | Time taken by a worker to complete a task, labeled by `name` |
+
+Latency histograms use default buckets of `[0.05, 0.5, 1, 5, 30, 60, 600]` seconds. Storage lock latency uses finer-grained buckets of `[0.001, 0.01, 0.1, 1, 5, 10, 15, 30, 60]` seconds.
+
+## Prometheus scrape configuration
+
+Add a scrape job to your Prometheus configuration:
+
+```yaml
+scrape_configs:
+  - job_name: 'zot'
+    static_configs:
+      - targets: ['localhost:5000']
+    metrics_path: /metrics
+    # If auth is required:
+    basic_auth:
+      username: prometheus
+      password: <scrape-password>
+```
+
+  </Tab>
+</Tabs>
+
+## Logging configuration
+
+zot writes structured JSON logs to stdout by default. Configure the log level and output destination in the `log` block:
+
+```json
+{
+  "log": {
+    "level": "info",
+    "output": "/var/log/zot/zot.log",
+    "audit": "/var/log/zot/audit.log"
+  }
+}
+```
+
+<ParamField path="log.level" type="string">
+  Minimum log level. One of: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`, `"panic"`. Defaults to `"debug"`.
+</ParamField>
+
+<ParamField path="log.output" type="string">
+  File path for log output. When omitted, logs are written to stdout.
+</ParamField>
+
+<ParamField path="log.audit" type="string">
+  File path for the audit log. When set, zot writes a separate audit trail that includes GC deletions and other security-relevant events. Audit log entries include the repository, digest, decision (delete/keep), and reason.
+</ParamField>
+
+<Tip>
+Set `"level": "info"` in production. The `"debug"` level is verbose and may expose request details in the log output.
+</Tip>
+
+## Rate limiting
+
+zot can enforce request rate limits globally and per HTTP method. This protects the registry from traffic spikes or abusive clients.
+
+```json
+{
+  "http": {
+    "ratelimit": {
+      "rate": 10,
+      "methods": [
+        {
+          "method": "GET",
+          "rate": 5
+        }
+      ]
+    }
+  }
+}
+```
+
+<ParamField path="http.ratelimit.rate" type="integer">
+  Global maximum number of requests per second across all HTTP methods.
+</ParamField>
+
+<ParamField path="http.ratelimit.methods" type="array">
+  Per-method rate limit overrides. Each entry specifies a `method` (e.g., `"GET"`, `"POST"`, `"PUT"`) and a `rate` in requests per second.
+</ParamField>
+
+In the example above, all methods combined are limited to 10 requests per second, and GET requests are further limited to 5 per second.
+
+<Warning>
+Rate limits apply per zot instance. In a clustered deployment with a load balancer, the effective limit seen by a single client depends on how the load balancer distributes traffic across instances.
+</Warning>
+
+## Example: complete monitoring configuration
+
+The following configuration combines metrics, logging, and a rate limit:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "ratelimit": {
+      "rate": 100,
+      "methods": [
+        {
+          "method": "GET",
+          "rate": 50
+        }
+      ]
+    }
+  },
+  "log": {
+    "level": "info",
+    "output": "/var/log/zot/zot.log",
+    "audit": "/var/log/zot/audit.log"
+  },
+  "extensions": {
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    }
+  }
+}
+```

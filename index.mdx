@@ -1,97 +1,93 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Welcome to zot"
+description: "A production-ready, vendor-neutral OCI-native container image and artifact registry built purely on the OCI Distribution Specification."
 ---
 
-## Setting up
+zot is a scale-out, production-ready container image registry that stores images in [OCI image format](https://github.com/opencontainers/image-spec) and communicates using the [OCI Distribution Specification](https://github.com/opencontainers/distribution-spec) on-the-wire. No vendor lock-in, no proprietary extensions — just OCI, all the way down.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get a zot registry running locally in minutes
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/install">
+    Binary, Docker, Helm, and Kubernetes install options
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Configure storage, auth, extensions, and more
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/overview">
+    OCI Distribution API endpoints and GraphQL search
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why zot?
 
-Everything you need to create world-class documentation.
+zot is the only fully OCI-native registry — every image is stored on disk in the OCI Image Layout format, so your data is always portable and never locked in to a proprietary format.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="OCI Compliant" icon="certificate">
+    Fully conformant with the OCI Distribution Specification v1.1
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Flexible Storage" icon="database">
+    Local filesystem, Amazon S3, or Google Cloud Storage backends
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Strong Security" icon="shield-halved">
+    htpasswd, LDAP, OpenID Connect, mTLS authentication with fine-grained RBAC
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Registry Sync" icon="arrows-rotate">
+    Mirror registries on-demand or on a schedule with the sync extension
   </Card>
-</Columns>
+  <Card title="CVE Scanning" icon="bug">
+    Built-in vulnerability scanning via the search extension and Trivy
+  </Card>
+  <Card title="Scale Out" icon="server">
+    Horizontal clustering with Redis-backed session and metadata storage
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Get started
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Steps>
+  <Step title="Install zot">
+    Download a pre-built binary or pull the container image:
+    ```bash
+    docker pull ghcr.io/project-zot/zot-linux-amd64:latest
+    ```
+  </Step>
+  <Step title="Create a minimal config">
+    Create `config.json` with basic settings:
+    ```json config.json
+    {
+      "distSpecVersion": "1.1.1",
+      "storage": { "rootDirectory": "/var/lib/registry" },
+      "http": { "address": "0.0.0.0", "port": "5000" },
+      "log": { "level": "info" }
+    }
+    ```
+  </Step>
+  <Step title="Start the registry">
+    ```bash
+    zot serve config.json
+    ```
+  </Step>
+  <Step title="Push your first image">
+    ```bash
+    docker tag myimage localhost:5000/myimage:latest
+    docker push localhost:5000/myimage:latest
+    ```
+  </Step>
+</Steps>
+
+## Explore the docs
+
+<CardGroup cols={3}>
+  <Card title="Extensions" icon="puzzle-piece" href="/extensions/overview">
+    Sync, search, metrics, image trust, and more
+  </Card>
+  <Card title="Operations" icon="wrench" href="/operations/clustering">
+    Clustering, GC, TLS, and monitoring
+  </Card>
+  <Card title="Guides" icon="book" href="/guides/kubernetes">
+    Kubernetes, cloud storage, and CLI tools
+  </Card>
+</CardGroup>

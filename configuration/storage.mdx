@@ -1,0 +1,397 @@
+---
+title: "Storage configuration"
+description: "Configure zot's storage backend: local filesystem, Amazon S3, Google Cloud Storage, deduplication, garbage collection, and image retention policies."
+---
+
+The `storage` section of the zot configuration controls where image layers, manifests, and blobs are stored. zot supports a local filesystem backend out of the box, and can be extended to use Amazon S3 or Google Cloud Storage through its pluggable `storageDriver` mechanism.
+
+## Local filesystem
+
+The simplest storage setup uses the local filesystem. Point `rootDirectory` at a directory that zot has read/write access to:
+
+```json
+{
+  "storage": {
+    "rootDirectory": "/var/lib/zot",
+    "dedupe": true,
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "6h",
+    "commit": false
+  }
+}
+```
+
+### Local storage fields
+
+<ParamField path="storage.rootDirectory" type="string" required>
+  Absolute path to the directory where zot stores all registry data. zot creates this directory if it does not exist.
+</ParamField>
+
+<ParamField path="storage.dedupe" type="boolean" default="true">
+  Enable content-addressable blob deduplication. When enabled, identical blobs are stored only once on disk regardless of how many repositories reference them. Reduces storage consumption significantly for images that share base layers.
+</ParamField>
+
+<ParamField path="storage.remoteCache" type="boolean" default="false">
+  When using a remote storage backend (S3 or GCS) with `dedupe: true`, set this to `true` to store the deduplication index in a remote cache (DynamoDB or Redis) rather than locally. Required for correct deduplication across multiple zot instances.
+</ParamField>
+
+<ParamField path="storage.gc" type="boolean" default="true">
+  Enable garbage collection of unreferenced blobs. When disabled, deleted or overwritten image layers remain on disk indefinitely.
+</ParamField>
+
+<ParamField path="storage.gcDelay" type="string" default="1h">
+  How long a blob must be unreferenced before it is eligible for garbage collection. Accepts Go duration strings: `"1h"`, `"30m"`, `"2h30m"`. This delay prevents GC from removing blobs that are still being uploaded.
+</ParamField>
+
+<ParamField path="storage.gcInterval" type="string" default="6h">
+  How frequently the garbage collector runs. Accepts Go duration strings.
+</ParamField>
+
+<ParamField path="storage.commit" type="boolean" default="false">
+  Sync filesystem writes to disk after each operation using `fsync`. Increases durability at the cost of write performance. Useful in environments where the host may crash without warning.
+</ParamField>
+
+## Remote storage backends
+
+zot supports remote object storage through a `storageDriver` block. When `storageDriver` is configured, the registry streams blobs directly to the remote store. The local `rootDirectory` is still required as a temporary staging area for uploads in progress.
+
+<Tabs>
+  <Tab title="Amazon S3">
+    ```json
+    {
+      "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": true,
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot",
+          "region": "us-east-2",
+          "bucket": "zot-storage",
+          "forcepathstyle": true,
+          "secure": true,
+          "skipverify": false
+        },
+        "cacheDriver": {
+          "name": "dynamodb",
+          "endpoint": "http://localhost:4566",
+          "region": "us-east-2",
+          "cacheTablename": "MainTable"
+        }
+      }
+    }
+    ```
+
+    ### S3 driver fields
+
+    <ParamField path="storageDriver.name" type="string" required>
+      Must be `"s3"`.
+    </ParamField>
+
+    <ParamField path="storageDriver.rootdirectory" type="string" required>
+      Key prefix within the S3 bucket. All objects are stored under this prefix.
+    </ParamField>
+
+    <ParamField path="storageDriver.region" type="string" required>
+      AWS region where the bucket is located. Example: `"us-east-2"`.
+    </ParamField>
+
+    <ParamField path="storageDriver.bucket" type="string" required>
+      Name of the S3 bucket.
+    </ParamField>
+
+    <ParamField path="storageDriver.forcepathstyle" type="boolean" default="false">
+      Use path-style S3 URLs (`s3.amazonaws.com/bucket/key`) instead of virtual-hosted-style (`bucket.s3.amazonaws.com/key`). Required for S3-compatible services like MinIO and LocalStack.
+    </ParamField>
+
+    <ParamField path="storageDriver.secure" type="boolean" default="true">
+      Use HTTPS when connecting to S3.
+    </ParamField>
+
+    <ParamField path="storageDriver.skipverify" type="boolean" default="false">
+      Skip TLS certificate verification. Use only for testing with self-signed certificates.
+    </ParamField>
+
+    <Note>
+      zot uses the standard AWS credential chain: environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), `~/.aws/credentials`, or an IAM instance role. No credentials are specified directly in the config file.
+    </Note>
+
+    ### DynamoDB cache for S3 deduplication
+
+    When using S3 with `dedupe: true` and `remoteCache: true`, configure a DynamoDB table to store the deduplication index:
+
+    <ParamField path="cacheDriver.name" type="string">
+      Must be `"dynamodb"`.
+    </ParamField>
+
+    <ParamField path="cacheDriver.endpoint" type="string">
+      DynamoDB endpoint. Use the standard AWS endpoint or a local endpoint for testing (e.g., `"http://localhost:4566"` for LocalStack).
+    </ParamField>
+
+    <ParamField path="cacheDriver.region" type="string">
+      AWS region for DynamoDB.
+    </ParamField>
+
+    <ParamField path="cacheDriver.cacheTablename" type="string">
+      Name of the DynamoDB table used for the deduplication cache.
+    </ParamField>
+  </Tab>
+  <Tab title="Google Cloud Storage">
+    ```json
+    {
+      "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": false,
+        "storageDriver": {
+          "name": "gcs",
+          "rootdirectory": "/zot",
+          "bucket": "zot-storage",
+          "credentialsFile": "/path/to/gcs-credentials.json"
+        }
+      }
+    }
+    ```
+
+    ### GCS driver fields
+
+    <ParamField path="storageDriver.name" type="string" required>
+      Must be `"gcs"`.
+    </ParamField>
+
+    <ParamField path="storageDriver.rootdirectory" type="string" required>
+      Object prefix within the GCS bucket.
+    </ParamField>
+
+    <ParamField path="storageDriver.bucket" type="string" required>
+      Name of the GCS bucket.
+    </ParamField>
+
+    <ParamField path="storageDriver.credentialsFile" type="string">
+      Path to a GCP service account key JSON file. If omitted, zot uses Application Default Credentials (ADC), which works automatically on GKE and Cloud Run.
+    </ParamField>
+  </Tab>
+  <Tab title="Local (default)">
+    ```json
+    {
+      "storage": {
+        "rootDirectory": "/var/lib/zot",
+        "dedupe": true,
+        "gc": true,
+        "gcDelay": "1h",
+        "gcInterval": "6h",
+        "commit": false
+      }
+    }
+    ```
+
+    No `storageDriver` key is needed for local filesystem storage. zot defaults to the local driver when `storageDriver` is absent.
+  </Tab>
+</Tabs>
+
+## Multi-path routing with subPaths
+
+zot can route different repository prefixes to separate storage backends using `subPaths`. Each entry in `subPaths` is a URL path prefix mapped to its own `StorageConfig`.
+
+This is useful for:
+
+- Separating high-churn images (e.g., `tmp/`) from production images
+- Routing specific namespaces to a different S3 bucket or GCS bucket
+- Applying different GC or retention policies per namespace
+
+```json
+{
+  "storage": {
+    "rootDirectory": "/tmp/zot",
+    "dedupe": true,
+    "storageDriver": {
+      "name": "s3",
+      "rootdirectory": "/zot",
+      "region": "us-east-2",
+      "bucket": "zot-main",
+      "forcepathstyle": true,
+      "secure": true
+    },
+    "subPaths": {
+      "/a": {
+        "rootDirectory": "/tmp/zot-a",
+        "dedupe": false,
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot-a",
+          "region": "us-east-2",
+          "bucket": "zot-storage",
+          "forcepathstyle": true,
+          "secure": true
+        }
+      },
+      "/b": {
+        "rootDirectory": "/tmp/zot-b",
+        "dedupe": true,
+        "remoteCache": false,
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot-b",
+          "region": "us-east-2",
+          "bucket": "zot-storage",
+          "forcepathstyle": true,
+          "secure": true
+        }
+      }
+    }
+  }
+}
+```
+
+Each subPath entry accepts the same fields as the top-level `storage` object, including its own `storageDriver`, `cacheDriver`, `dedupe`, `gc`, and `retention` settings.
+
+<Note>
+  The path prefix must begin with `/`. Repository names are matched against the longest prefix first. A repository like `a/myimage:latest` is routed to the `/a` subPath.
+</Note>
+
+## BoltDB deduplication cache
+
+When running on local storage (no `storageDriver`) with `dedupe: true`, zot stores the deduplication index in an embedded BoltDB database in `rootDirectory`. No extra configuration is required.
+
+```json
+{
+  "storage": {
+    "rootDirectory": "/var/lib/zot",
+    "dedupe": true,
+    "remoteCache": false
+  }
+}
+```
+
+Setting `remoteCache: false` (the default) explicitly uses the local BoltDB cache.
+
+## Image retention policies
+
+zot can automatically delete old tags, untagged images, and referrers based on configurable retention policies. Retention runs on the GC schedule.
+
+```json
+{
+  "storage": {
+    "rootDirectory": "/tmp/zot",
+    "gc": true,
+    "gcDelay": "2h",
+    "gcInterval": "1h",
+    "retention": {
+      "dryRun": false,
+      "delay": "24h",
+      "policies": [
+        {
+          "repositories": ["infra/*", "prod/*"],
+          "deleteReferrers": false,
+          "keepTags": [
+            { "patterns": ["v2.*", ".*-prod"] },
+            {
+              "patterns": ["v3.*", ".*-prod"],
+              "pulledWithin": "168h"
+            }
+          ]
+        },
+        {
+          "repositories": ["tmp/**"],
+          "deleteReferrers": true,
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "patterns": ["v1.*"],
+              "pulledWithin": "168h",
+              "pushedWithin": "168h"
+            }
+          ]
+        },
+        {
+          "repositories": ["**"],
+          "deleteReferrers": true,
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "mostRecentlyPushedCount": 10,
+              "mostRecentlyPulledCount": 10,
+              "pulledWithin": "720h",
+              "pushedWithin": "720h"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
+```
+
+### Retention top-level fields
+
+<ParamField path="storage.retention.dryRun" type="boolean" default="false">
+  When `true`, zot logs what would be deleted without actually deleting anything. Use this to validate your policy before enabling it.
+</ParamField>
+
+<ParamField path="storage.retention.delay" type="string" default="24h">
+  Minimum age before an untagged image or referrer is eligible for deletion. Accepts Go duration strings.
+</ParamField>
+
+<ParamField path="storage.retention.policies" type="array">
+  Ordered list of retention policies. Policies are evaluated in order; the first matching policy wins.
+</ParamField>
+
+### RetentionPolicy fields
+
+<ParamField path="policies[].repositories" type="string[]" required>
+  Glob patterns matching repository names this policy applies to. Supports `*` (single path segment) and `**` (any number of segments). Example: `["infra/*", "prod/**"]`.
+</ParamField>
+
+<ParamField path="policies[].deleteReferrers" type="boolean" default="false">
+  Delete OCI referrers (signatures, SBOMs, attestations) that reference deleted manifests.
+</ParamField>
+
+<ParamField path="policies[].deleteUntagged" type="boolean">
+  Delete manifests that have no tag. Useful for cleaning up intermediate build artifacts.
+</ParamField>
+
+<ParamField path="policies[].keepTags" type="array">
+  Rules for which tagged images to retain. Tags not matched by any `keepTags` rule are deleted.
+</ParamField>
+
+### KeepTagsPolicy fields
+
+<ParamField path="keepTags[].patterns" type="string[]">
+  Regular expression patterns. A tag is retained if it matches any pattern. Example: `["v2\\..*", ".*-stable"]`.
+</ParamField>
+
+<ParamField path="keepTags[].pulledWithin" type="string">
+  Retain tags that have been pulled within this duration. Example: `"168h"` (7 days).
+</ParamField>
+
+<ParamField path="keepTags[].pushedWithin" type="string">
+  Retain tags that were pushed within this duration.
+</ParamField>
+
+<ParamField path="keepTags[].mostRecentlyPushedCount" type="number">
+  Keep the N most recently pushed tags in matched repositories.
+</ParamField>
+
+<ParamField path="keepTags[].mostRecentlyPulledCount" type="number">
+  Keep the N most recently pulled tags in matched repositories.
+</ParamField>
+
+<Warning>
+  Retention policies permanently delete image data. Always test with `dryRun: true` before enabling deletion in production.
+</Warning>
+
+## Periodic garbage collection
+
+Configure standalone GC without image retention:
+
+```json
+{
+  "storage": {
+    "rootDirectory": "/var/lib/zot",
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "6h"
+  }
+}
+```
+
+GC removes blobs that are no longer referenced by any manifest after `gcDelay` has elapsed since they were last referenced. The `gcInterval` controls how often the GC process wakes up to scan for eligible blobs.

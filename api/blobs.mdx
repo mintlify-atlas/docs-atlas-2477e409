@@ -1,0 +1,344 @@
+---
+title: "Blobs"
+description: "Download, upload, and delete content-addressed blobs in zot."
+---
+
+Blobs are the raw byte streams that make up image layers and configuration objects. zot uses content-addressable storage: every blob is identified by its digest — the algorithm and hex-encoded hash of its content (e.g., `sha256:abc123...`). The most common algorithm is SHA-256, expressed as `sha256:<64 hex chars>`.
+
+Blob uploads use a resumable, chunked protocol:
+1. **Initiate** — `POST .../blobs/uploads/` to get an upload session URL.
+2. **Upload** — `PATCH .../blobs/uploads/<session_id>` to stream the blob content (one or more chunks).
+3. **Commit** — `PUT .../blobs/uploads/<session_id>?digest=<digest>` to finalize and verify the upload.
+
+---
+
+## Download a blob
+
+<ParamField path="name" type="string" required>
+  Repository name (e.g., `myorg/myapp`).
+</ParamField>
+
+<ParamField path="digest" type="string" required>
+  Content digest of the blob in the format `<algorithm>:<hex>` (e.g., `sha256:abc123...`).
+</ParamField>
+
+```
+GET /v2/<name>/blobs/<digest>
+```
+
+Downloads the raw blob content. The response body is the blob byte stream. The `Content-Type` is `application/octet-stream` for layers.
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Docker-Content-Digest` | Digest of the returned blob. |
+| `Content-Length` | Size of the blob in bytes. |
+
+### Examples
+
+<CodeGroup>
+
+```bash Download a layer blob
+curl -L \
+  https://registry.example.com:5000/v2/myorg/myapp/blobs/sha256:9d21b12d5fab9b24e1d4... \
+  -o layer.tar.gz
+```
+
+```bash Download config blob
+curl -H "Accept: application/vnd.oci.image.config.v1+json" \
+  https://registry.example.com:5000/v2/myorg/myapp/blobs/sha256:44136fa355ba77b9ad7b35f... \
+  | jq .
+```
+
+```bash With authentication
+curl -u username:password -L \
+  https://registry.example.com:5000/v2/myorg/myapp/blobs/sha256:abc123... \
+  -o blob.bin
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Success. Body is the blob content. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository or blob not found. |
+| `500` | Internal server error. |
+
+---
+
+## Check blob existence
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="digest" type="string" required>
+  Content digest of the blob.
+</ParamField>
+
+```
+HEAD /v2/<name>/blobs/<digest>
+```
+
+Checks whether a blob exists without downloading its content. Returns the same headers as `GET` but with no body. Useful for deduplication checks before uploading.
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Docker-Content-Digest` | Digest of the blob. |
+| `Content-Length` | Size of the blob in bytes. |
+
+### Examples
+
+```bash
+curl -I \
+  https://registry.example.com:5000/v2/myorg/myapp/blobs/sha256:abc123...
+```
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Blob exists. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Blob not found. |
+
+---
+
+## Initiate a blob upload
+
+<ParamField path="name" type="string" required>
+  Repository name. The repository is created automatically if it does not exist.
+</ParamField>
+
+```
+POST /v2/<name>/blobs/uploads/
+```
+
+Starts a new resumable blob upload session. The response `Location` header contains the URL for uploading data.
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Location` | Upload URL: `/v2/<name>/blobs/uploads/<session_id>`. |
+| `Range` | Byte range received so far, always `0-0` for a new session. |
+| `Blob-Upload-UUID` | Opaque upload session identifier. |
+
+### Examples
+
+```bash
+curl -X POST -I \
+  -H "Content-Length: 0" \
+  https://registry.example.com:5000/v2/myorg/myapp/blobs/uploads/
+```
+
+```http Example response
+HTTP/1.1 202 Accepted
+Location: /v2/myorg/myapp/blobs/uploads/550e8400-e29b-41d4-a716-446655440000
+Range: 0-0
+Blob-Upload-UUID: 550e8400-e29b-41d4-a716-446655440000
+```
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `202` | Session created. Use `Location` for subsequent upload requests. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository not found. |
+| `500` | Internal server error. |
+
+---
+
+## Upload a blob chunk
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="session_id" type="string" required>
+  Upload session ID returned from the `POST /blobs/uploads/` response `Location` header.
+</ParamField>
+
+```
+PATCH /v2/<name>/blobs/uploads/<session_id>
+```
+
+Uploads a chunk of blob data. The body must be the raw bytes for this chunk. Use the `Content-Range` header to indicate the byte range being uploaded. Multiple `PATCH` requests can be used to upload a single blob in parts.
+
+### Request headers
+
+| Header | Description |
+|--------|-------------|
+| `Content-Range` | Byte range of this chunk (e.g., `0-1048575`). |
+| `Content-Length` | Number of bytes in this chunk. |
+| `Content-Type` | Must be `application/octet-stream`. |
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Location` | Upload URL for the next chunk. |
+| `Range` | Total bytes received so far (e.g., `0-1048575`). |
+| `Blob-Upload-UUID` | Session identifier. |
+
+### Examples
+
+```bash
+curl -X PATCH \
+  -H "Content-Type: application/octet-stream" \
+  -H "Content-Range: 0-1048575" \
+  --data-binary @chunk.bin \
+  "https://registry.example.com:5000/v2/myorg/myapp/blobs/uploads/550e8400-e29b-41d4-a716-446655440000"
+```
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `202` | Chunk accepted. |
+| `400` | Bad request (e.g., invalid content range). |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Upload session not found. |
+| `416` | Range not satisfiable (gap in uploaded bytes). |
+| `500` | Internal server error. |
+
+---
+
+## Complete a blob upload
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="session_id" type="string" required>
+  Upload session ID.
+</ParamField>
+
+<ParamField query="digest" type="string" required>
+  Expected digest of the complete blob (e.g., `sha256:abc123...`). The server verifies the uploaded content matches this digest. If they do not match, the upload is rejected.
+</ParamField>
+
+```
+PUT /v2/<name>/blobs/uploads/<session_id>?digest=<digest>
+```
+
+Finalizes the blob upload. May optionally include the final chunk of data in the request body; if all data was already sent via `PATCH`, the body can be empty. The server verifies the content digest and, if valid, commits the blob to the repository.
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Docker-Content-Digest` | Digest of the committed blob. |
+| `Location` | URL of the committed blob: `/v2/<name>/blobs/<digest>`. |
+
+### Examples
+
+```bash
+# Complete upload with final chunk
+curl -X PUT \
+  -H "Content-Type: application/octet-stream" \
+  --data-binary @final-chunk.bin \
+  "https://registry.example.com:5000/v2/myorg/myapp/blobs/uploads/550e8400-e29b-41d4-a716-446655440000?digest=sha256:abc123..."
+
+# Complete upload with no body (all data already PATCH'd)
+curl -X PUT \
+  -H "Content-Length: 0" \
+  "https://registry.example.com:5000/v2/myorg/myapp/blobs/uploads/550e8400-e29b-41d4-a716-446655440000?digest=sha256:abc123..."
+```
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `201` | Blob committed successfully. |
+| `400` | Bad request (digest mismatch or invalid parameters). |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Upload session not found. |
+| `500` | Internal server error. |
+
+---
+
+## Delete a blob
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="digest" type="string" required>
+  Content digest of the blob to delete.
+</ParamField>
+
+```
+DELETE /v2/<name>/blobs/<digest>
+```
+
+Deletes a blob from the repository.
+
+<Warning>
+Only delete blobs that are not referenced by any manifest. Deleting a blob that is still referenced by a manifest will leave the registry in an inconsistent state.
+</Warning>
+
+### Examples
+
+```bash
+curl -X DELETE \
+  https://registry.example.com:5000/v2/myorg/myapp/blobs/sha256:abc123...
+```
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `202` | Blob deletion accepted. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Blob not found. |
+| `500` | Internal server error. |
+
+---
+
+## Complete blob upload workflow
+
+The following example shows how to upload a single-layer OCI image blob from start to finish.
+
+```bash
+# 1. Compute the digest of the blob to upload
+BLOB_FILE="layer.tar.gz"
+DIGEST="sha256:$(sha256sum $BLOB_FILE | awk '{print $1}')"
+BLOB_SIZE=$(stat -c%s "$BLOB_FILE")
+REPO="myorg/myapp"
+REGISTRY="https://registry.example.com:5000"
+
+# 2. Initiate the upload session
+LOCATION=$(curl -s -X POST -I \
+  -H "Content-Length: 0" \
+  "$REGISTRY/v2/$REPO/blobs/uploads/" \
+  | grep -i "^location:" | awk '{print $2}' | tr -d '\r')
+
+# 3. Upload the blob in a single PATCH
+curl -X PATCH \
+  -H "Content-Type: application/octet-stream" \
+  -H "Content-Length: $BLOB_SIZE" \
+  --data-binary "@$BLOB_FILE" \
+  "$REGISTRY$LOCATION"
+
+# 4. Complete the upload (commit with digest verification)
+curl -X PUT \
+  -H "Content-Length: 0" \
+  "$REGISTRY$LOCATION&digest=$DIGEST"
+
+# 5. Verify the blob is accessible
+curl -I "$REGISTRY/v2/$REPO/blobs/$DIGEST"
+```

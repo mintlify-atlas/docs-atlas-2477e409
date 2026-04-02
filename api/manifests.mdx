@@ -1,0 +1,397 @@
+---
+title: "Manifests"
+description: "Pull, push, check, and delete OCI image manifests in zot."
+---
+
+A manifest is a JSON document that describes a container image or OCI artifact: it references a config blob and an ordered list of layer blobs. The OCI Distribution Specification defines two content types used by zot:
+
+- **OCI Image Manifest** (`application/vnd.oci.image.manifest.v1+json`) — the current OCI standard.
+- **OCI Image Index** (`application/vnd.oci.image.index.v1+json`) — a multi-platform image that references other manifests.
+- **Docker Image Manifest V2** (`application/vnd.docker.distribution.manifest.v2+json`) — Docker-compatible format, also supported.
+
+The `reference` path parameter accepts either a **tag** (e.g., `latest`, `v1.0.0`) or a **digest** (e.g., `sha256:abc123...`). Digest references are immutable.
+
+---
+
+## Pull a manifest
+
+<ParamField path="name" type="string" required>
+  Repository name (e.g., `myorg/myapp`).
+</ParamField>
+
+<ParamField path="reference" type="string" required>
+  Image tag (e.g., `latest`) or digest (e.g., `sha256:abc123...`).
+</ParamField>
+
+```
+GET /v2/<name>/manifests/<reference>
+```
+
+Downloads the manifest for a given image reference. The `Accept` header controls which manifest media types the client is willing to receive.
+
+| Accept header value | Format |
+|---------------------|--------|
+| `application/vnd.oci.image.manifest.v1+json` | OCI Image Manifest |
+| `application/vnd.oci.image.index.v1+json` | OCI Image Index |
+| `application/vnd.docker.distribution.manifest.v2+json` | Docker Manifest V2 |
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Docker-Content-Digest` | The digest of the returned manifest content. |
+| `Content-Type` | The media type of the manifest. |
+| `Content-Length` | Size of the manifest body in bytes. |
+
+### Response body
+
+<ResponseField name="schemaVersion" type="integer">
+  Manifest schema version. Always `2` for OCI manifests.
+</ResponseField>
+
+<ResponseField name="mediaType" type="string">
+  The media type of the manifest (e.g., `application/vnd.oci.image.manifest.v1+json`).
+</ResponseField>
+
+<ResponseField name="artifactType" type="string">
+  IANA media type of the artifact when the manifest represents an artifact rather than a container image.
+</ResponseField>
+
+<ResponseField name="config" type="object">
+  Descriptor for the image configuration blob.
+  <Expandable title="properties">
+    <ResponseField name="mediaType" type="string">Media type of the config blob.</ResponseField>
+    <ResponseField name="digest" type="string">Digest of the config blob (e.g., `sha256:abc...`).</ResponseField>
+    <ResponseField name="size" type="integer">Size of the config blob in bytes.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="layers" type="object[]">
+  Ordered list of layer descriptors.
+  <Expandable title="properties">
+    <ResponseField name="mediaType" type="string">Media type of the layer (e.g., `application/vnd.oci.image.layer.v1.tar+gzip`).</ResponseField>
+    <ResponseField name="digest" type="string">Content digest of the layer.</ResponseField>
+    <ResponseField name="size" type="integer">Size of the layer in bytes.</ResponseField>
+    <ResponseField name="urls" type="string[]">Optional list of URLs from which this layer may be downloaded.</ResponseField>
+    <ResponseField name="annotations" type="object">Arbitrary key-value metadata for this layer.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="subject" type="object">
+  Optional descriptor linking this manifest to another manifest (used for OCI referrers).
+</ResponseField>
+
+<ResponseField name="annotations" type="object">
+  Arbitrary key-value metadata for the image manifest.
+</ResponseField>
+
+### Examples
+
+<CodeGroup>
+
+```bash Pull by tag
+curl -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/latest
+```
+
+```bash Pull by digest
+curl -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/sha256:abc123...
+```
+
+```bash With authentication
+curl -u username:password \
+  -H "Accept: application/vnd.oci.image.manifest.v1+json" \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/v1.0.0
+```
+
+</CodeGroup>
+
+```json Example response
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:44136fa355ba77b9ad7b35f...",
+    "size": 7023
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:9d21b12d5fab9b24e1d4...",
+      "size": 2818413
+    }
+  ],
+  "annotations": {
+    "org.opencontainers.image.created": "2024-01-15T12:00:00Z"
+  }
+}
+```
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Success. Body contains the manifest JSON. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository or manifest not found. |
+| `500` | Internal server error. |
+
+---
+
+## Check manifest existence
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="reference" type="string" required>
+  Image tag or digest.
+</ParamField>
+
+```
+HEAD /v2/<name>/manifests/<reference>
+```
+
+Checks whether a manifest exists without downloading the manifest body. Returns the same headers as `GET` but with no response body. This is useful for efficiently checking existence before pulling.
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Docker-Content-Digest` | Digest of the manifest. |
+| `Content-Type` | Media type of the manifest. |
+| `Content-Length` | Size of the manifest in bytes. |
+
+### Examples
+
+<CodeGroup>
+
+```bash Check by tag
+curl -I https://registry.example.com:5000/v2/myorg/myapp/manifests/latest
+```
+
+```bash Check by digest
+curl -I https://registry.example.com:5000/v2/myorg/myapp/manifests/sha256:abc123...
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Manifest exists. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository or manifest not found. |
+| `500` | Internal server error. |
+
+---
+
+## Push a manifest
+
+<ParamField path="name" type="string" required>
+  Repository name. The repository is created automatically if it does not exist.
+</ParamField>
+
+<ParamField path="reference" type="string" required>
+  Tag to apply (e.g., `latest`, `v1.0.0`) or a digest (e.g., `sha256:abc123...`).
+</ParamField>
+
+<ParamField query="tag" type="string[]">
+  One or more additional tags to apply when pushing by digest. Can be specified multiple times (e.g., `?tag=latest&tag=v1`). Up to 46 `tag=` parameters are supported per request.
+</ParamField>
+
+```
+PUT /v2/<name>/manifests/<reference>
+```
+
+Pushes a manifest to the registry. The `Content-Type` header must match the manifest media type in the manifest body. All referenced blobs (config and layers) must already exist in the repository before the manifest is pushed.
+
+### Request headers
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `Content-Type` | Yes | Media type of the manifest (e.g., `application/vnd.oci.image.manifest.v1+json`). |
+
+### Request body
+
+The raw manifest JSON document. See the response body schema in [Pull a manifest](#pull-a-manifest).
+
+### Response headers
+
+| Header | Description |
+|--------|-------------|
+| `Docker-Content-Digest` | Digest of the uploaded manifest. |
+| `Location` | URL of the committed manifest (e.g., `/v2/myorg/myapp/manifests/sha256:abc...`). |
+| `OCI-Tag` | Echoed `tag=` query parameter value. Repeated once per `tag=` parameter when pushing by digest. |
+
+<Note>
+When pushing to a digest reference with `tag=` query parameters, the `OCI-Tag` header is repeated in the response — one occurrence per tag — per the OCI Distribution Specification draft.
+</Note>
+
+### Examples
+
+<CodeGroup>
+
+```bash Push by tag
+MANIFEST=$(cat manifest.json)
+
+curl -X PUT \
+  -H "Content-Type: application/vnd.oci.image.manifest.v1+json" \
+  -d "$MANIFEST" \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/v1.0.0
+```
+
+```bash Push by digest with additional tags
+curl -X PUT \
+  -H "Content-Type: application/vnd.oci.image.manifest.v1+json" \
+  -d @manifest.json \
+  "https://registry.example.com:5000/v2/myorg/myapp/manifests/sha256:abc123...?tag=latest&tag=stable"
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `201` | Manifest was created or updated successfully. |
+| `400` | Bad request (invalid manifest, missing blobs, or invalid content type). |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository not found. |
+| `414` | Too many `tag=` query parameters (maximum is 46). |
+| `500` | Internal server error. |
+
+---
+
+## Delete a manifest
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="reference" type="string" required>
+  Tag or digest of the manifest to delete.
+</ParamField>
+
+```
+DELETE /v2/<name>/manifests/<reference>
+```
+
+Deletes a manifest from the repository. When deleting by tag, the tag is removed. When deleting by digest, the manifest and any tags pointing to it are removed.
+
+<Warning>
+Deleting a manifest does not immediately free the blob storage. Blobs become unreferenced and are removed during the next garbage collection run.
+</Warning>
+
+### Examples
+
+<CodeGroup>
+
+```bash Delete by tag
+curl -X DELETE \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/v1.0.0
+```
+
+```bash Delete by digest
+curl -X DELETE \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/sha256:abc123...
+```
+
+```bash With authentication
+curl -u username:password -X DELETE \
+  https://registry.example.com:5000/v2/myorg/myapp/manifests/v1.0.0
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `202` | Manifest deletion accepted. |
+| `400` | Bad request (e.g., invalid digest format). |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository or manifest not found. |
+| `405` | Method not allowed (delete may be disabled). |
+| `409` | Conflict (e.g., manifest is referenced by an image index). |
+| `500` | Internal server error. |
+
+---
+
+## List referrers
+
+<ParamField path="name" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField path="digest" type="string" required>
+  The digest of the subject manifest whose referrers you want to list (e.g., `sha256:abc123...`).
+</ParamField>
+
+<ParamField query="artifactType" type="string">
+  Filter referrers by artifact type (e.g., `application/vnd.example.sbom`).
+</ParamField>
+
+```
+GET /v2/<name>/referrers/<digest>
+```
+
+Returns an OCI Image Index listing all OCI artifacts that reference a specific manifest by digest. This is part of the OCI Distribution Specification referrers API and is used to discover signatures (Cosign, Notation), SBOMs, attestations, and other artifacts attached to an image.
+
+### Response
+
+The response is an OCI Image Index (`application/vnd.oci.image.index.v1+json`) with `manifests` containing the referrer descriptors.
+
+```json
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.index.v1+json",
+  "manifests": [
+    {
+      "mediaType": "application/vnd.oci.image.manifest.v1+json",
+      "digest": "sha256:def456...",
+      "size": 512,
+      "artifactType": "application/vnd.example.signature",
+      "annotations": {
+        "org.opencontainers.image.created": "2024-01-10T12:00:00Z"
+      }
+    }
+  ]
+}
+```
+
+### Examples
+
+<CodeGroup>
+
+```bash List all referrers
+curl https://registry.example.com:5000/v2/myorg/myapp/referrers/sha256:abc123...
+```
+
+```bash Filter by artifact type
+curl "https://registry.example.com:5000/v2/myorg/myapp/referrers/sha256:abc123...?artifactType=application/vnd.sigstore.cosign.v2%2Bjson"
+```
+
+```bash With authentication
+curl -u username:password \
+  https://registry.example.com:5000/v2/myorg/myapp/referrers/sha256:abc123...
+```
+
+</CodeGroup>
+
+### Response codes
+
+| Code | Description |
+|------|-------------|
+| `200` | Success. Body is an OCI Image Index of referrers. |
+| `401` | Authentication required. |
+| `403` | Insufficient permissions. |
+| `404` | Repository not found. |
+| `500` | Internal server error. |

@@ -1,0 +1,182 @@
+---
+title: "Metrics"
+description: "Expose a Prometheus-compatible metrics endpoint to monitor zot's HTTP traffic, storage usage, and background scheduler activity."
+keywords: ["metrics", "Prometheus", "monitoring", "observability", "/metrics", "Grafana"]
+---
+
+The metrics extension adds a Prometheus-compatible scrape endpoint to zot. Prometheus (or any compatible collector) can scrape this endpoint to collect data on HTTP requests, per-repo storage usage, scheduler activity, and more.
+
+## Enabling metrics
+
+The metrics extension is compiled in using the `metrics` build tag. Enable it in the configuration file:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/tmp/zot"
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "8080"
+  },
+  "log": {
+    "level": "debug"
+  },
+  "extensions": {
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    }
+  }
+}
+```
+
+<ParamField path="extensions.metrics.enable" type="boolean" required>
+  Set to `true` to activate the metrics endpoint.
+</ParamField>
+
+<ParamField path="extensions.metrics.prometheus.path" type="string" default="/metrics">
+  URL path where Prometheus metrics are served. Defaults to `/metrics`.
+</ParamField>
+
+## Exposed metrics
+
+All metrics use the `zot_` namespace. The following metrics are available:
+
+### HTTP metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `zot_http_requests_total` | Counter | `method`, `code` | Total HTTP requests by method and response code |
+| `zot_http_repo_latency_seconds` | Summary | `repo` | Request latency per repository |
+| `zot_http_method_latency_seconds` | Histogram | `method` | Request latency per HTTP method |
+
+### Storage metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `zot_repo_storage_bytes` | Gauge | `repo` | Current disk usage per repository in bytes |
+| `zot_repo_uploads_total` | Counter | `repo` | Total image uploads per repository |
+| `zot_repo_downloads_total` | Counter | `repo` | Total image downloads per repository |
+| `zot_storage_lock_latency_seconds` | Histogram | `storageName`, `lockType` | Time spent acquiring storage locks |
+
+### Scheduler metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `zot_scheduler_generators_total` | Counter | — | Total background task generators registered |
+| `zot_scheduler_generators_status` | Gauge | `priority`, `state` | Generators grouped by priority and state |
+| `zot_scheduler_workers_total` | Gauge | — | Total available scheduler worker goroutines |
+| `zot_scheduler_workers` | Gauge | `state` | Workers grouped by current state |
+| `zot_scheduler_tasksqueue_length` | Gauge | `priority` | Tasks waiting in the queue by priority |
+| `zot_scheduler_workers_tasks_duration_seconds` | Histogram | `name` | Time each type of task takes to complete |
+
+### Server info
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `zot_info` | Gauge | `commit`, `binaryType`, `goVersion`, `version` | Static server metadata; always `0`, useful for labels |
+
+The `zot_info` metric carries build information as labels rather than a meaningful value. You can use it in Prometheus to annotate dashboards with the running version of zot.
+
+## Prometheus scrape configuration
+
+Add zot to your Prometheus configuration as a scrape target:
+
+```yaml
+scrape_configs:
+  - job_name: "zot"
+    static_configs:
+      - targets: ["localhost:8080"]
+    metrics_path: "/metrics"
+    scrape_interval: 15s
+```
+
+If you configured a custom `path`, update `metrics_path` accordingly.
+
+## Authentication for the metrics endpoint
+
+By default the metrics endpoint is subject to the same authentication rules as the rest of the registry. To restrict access to the metrics endpoint to a specific user without requiring authentication for image pulls, use `http.accessControl`:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/tmp/zot"
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "8080",
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      }
+    },
+    "accessControl": {
+      "metrics": {
+        "users": ["metrics"]
+      },
+      "repositories": {
+        "**": {
+          "anonymousPolicy": ["read"],
+          "defaultPolicy": ["read", "create"]
+        }
+      }
+    }
+  },
+  "log": {
+    "level": "debug"
+  },
+  "extensions": {
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    }
+  }
+}
+```
+
+In this configuration, only the `metrics` user can access `/metrics`. Anonymous users and other authenticated users can still pull images.
+
+Configure Prometheus to authenticate with the dedicated metrics user:
+
+```yaml
+scrape_configs:
+  - job_name: "zot"
+    static_configs:
+      - targets: ["localhost:8080"]
+    metrics_path: "/metrics"
+    basic_auth:
+      username: "metrics"
+      password: "your-password"
+```
+
+<Tip>
+Create the metrics user in your htpasswd file with `htpasswd -B /etc/zot/htpasswd metrics` and use the same password in your Prometheus config.
+</Tip>
+
+## Example Grafana queries
+
+Once metrics are flowing into Prometheus, you can build Grafana dashboards. A few useful queries:
+
+```promql
+# HTTP request rate by status code
+rate(zot_http_requests_total[5m])
+
+# 95th-percentile request latency by method
+histogram_quantile(0.95, rate(zot_http_method_latency_seconds_bucket[5m]))
+
+# Total storage used across all repositories
+sum(zot_repo_storage_bytes)
+
+# Download rate by repository
+rate(zot_repo_downloads_total[5m])
+
+# Scheduler queue depth
+sum by (priority) (zot_scheduler_tasksqueue_length)
+```

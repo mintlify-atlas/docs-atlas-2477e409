@@ -1,0 +1,363 @@
+---
+title: "Scale-out clustering"
+description: "Deploy zot as a horizontally scalable multi-node cluster with consistent request routing and shared cloud storage."
+---
+
+zot supports a scale-out clustering model that lets you run multiple stateless registry instances behind a load balancer. Each instance handles a subset of repositories determined by a consistent hashing algorithm, and all instances share the same backing object store (such as S3) and remote metadata cache (such as DynamoDB or Redis).
+
+<Note>
+Scale-out clustering requires a cloud-backed storage driver and a remote cache driver. Local filesystem storage cannot be shared between cluster members.
+</Note>
+
+## How clustering works
+
+When a request arrives at any cluster member, zot uses SipHash to map the repository name to a target member index:
+
+```
+targetIdx = SipHash(hashKey, repoName) % len(members)
+```
+
+SipHash was chosen specifically to resist hash-flooding attacks, where an adversary could craft repository names that collide to the same instance and create a denial-of-service condition.
+
+If the request lands on a member that is not the owner of the repository, that member transparently proxies the request to the correct owner. From the client's perspective, every node in the cluster is interchangeable — the load balancer can route to any of them.
+
+<Info>
+The `IsClustered()` check in `ClusterConfig` returns `true` only when two or more members are configured. A single-member `cluster` block is treated as standalone mode.
+</Info>
+
+## Cluster configuration
+
+The `cluster` block is added to every zot instance's configuration file. All members must have **identical** `cluster` blocks.
+
+```json
+{
+  "cluster": {
+    "members": [
+      "10.0.0.1:9000",
+      "10.0.0.2:9000",
+      "10.0.0.3:9000"
+    ],
+    "hashKey": "loremipsumdolors"
+  }
+}
+```
+
+<ParamField path="cluster.members" type="array of strings" required>
+  Ordered list of `host:port` addresses for every zot instance in the cluster. The order must be identical on every member — it determines which repositories each node owns.
+</ParamField>
+
+<ParamField path="cluster.hashKey" type="string" required>
+  A 128-bit (16-byte) key used by SipHash to compute repository-to-member assignments. Must be the same on every node. Generate a random 16-character ASCII string or 16 arbitrary bytes.
+</ParamField>
+
+<ParamField path="cluster.tls" type="object">
+  Optional TLS configuration for inter-node proxy connections. Uses the same `cert`, `key`, and `cacert` fields as the HTTP TLS block. Needed when member-to-member traffic should be encrypted.
+</ParamField>
+
+## Storage requirements
+
+Each cluster member needs:
+
+- A **shared object store** (S3, GCS, Azure Blob, etc.) configured via `storageDriver`. All members read and write the same bucket.
+- A **remote cache driver** (`dynamodb` or `redis`) configured via `cacheDriver`. This stores blob deduplication metadata and repository information that must be visible across all nodes.
+- `dedupe` must be set to `false` or `remoteCache` must be set to `true` when using a shared remote cache.
+
+## Setting up a three-node cluster
+
+<Steps>
+  <Step title="Provision shared infrastructure">
+    Create an S3-compatible bucket and a DynamoDB (or Redis) instance accessible from all cluster members. Each member must be able to reach the same bucket and cache endpoint.
+  </Step>
+
+  <Step title="Write a config for each member">
+    Each config file is identical except for the `http.address` and `http.port` values. The `cluster` block — including the `members` list and `hashKey` — must be byte-for-byte identical across all nodes.
+
+    <CodeGroup>
+
+    ```json member0 (port 9000)
+    {
+      "distSpecVersion": "1.1.1",
+      "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": false,
+        "remoteCache": true,
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot",
+          "region": "us-east-1",
+          "bucket": "zot-storage",
+          "forcepathstyle": true,
+          "secure": true
+        },
+        "cacheDriver": {
+          "name": "dynamodb",
+          "endpoint": "https://dynamodb.us-east-1.amazonaws.com",
+          "region": "us-east-1",
+          "cacheTablename": "ZotBlobTable",
+          "repoMetaTablename": "ZotRepoMetadataTable",
+          "imageMetaTablename": "ZotImageMetaTable",
+          "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+          "userDataTablename": "ZotUserDataTable",
+          "versionTablename": "ZotVersion",
+          "apiKeyTablename": "ZotApiKeyTable"
+        }
+      },
+      "http": {
+        "address": "10.0.0.1",
+        "port": "9000"
+      },
+      "log": { "level": "info" },
+      "cluster": {
+        "members": [
+          "10.0.0.1:9000",
+          "10.0.0.2:9000",
+          "10.0.0.3:9000"
+        ],
+        "hashKey": "loremipsumdolors"
+      }
+    }
+    ```
+
+    ```json member1 (port 9000)
+    {
+      "distSpecVersion": "1.1.1",
+      "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": false,
+        "remoteCache": true,
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot",
+          "region": "us-east-1",
+          "bucket": "zot-storage",
+          "forcepathstyle": true,
+          "secure": true
+        },
+        "cacheDriver": {
+          "name": "dynamodb",
+          "endpoint": "https://dynamodb.us-east-1.amazonaws.com",
+          "region": "us-east-1",
+          "cacheTablename": "ZotBlobTable",
+          "repoMetaTablename": "ZotRepoMetadataTable",
+          "imageMetaTablename": "ZotImageMetaTable",
+          "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+          "userDataTablename": "ZotUserDataTable",
+          "versionTablename": "ZotVersion",
+          "apiKeyTablename": "ZotApiKeyTable"
+        }
+      },
+      "http": {
+        "address": "10.0.0.2",
+        "port": "9000"
+      },
+      "log": { "level": "info" },
+      "cluster": {
+        "members": [
+          "10.0.0.1:9000",
+          "10.0.0.2:9000",
+          "10.0.0.3:9000"
+        ],
+        "hashKey": "loremipsumdolors"
+      }
+    }
+    ```
+
+    ```json member2 (port 9000)
+    {
+      "distSpecVersion": "1.1.1",
+      "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": false,
+        "remoteCache": true,
+        "storageDriver": {
+          "name": "s3",
+          "rootdirectory": "/zot",
+          "region": "us-east-1",
+          "bucket": "zot-storage",
+          "forcepathstyle": true,
+          "secure": true
+        },
+        "cacheDriver": {
+          "name": "dynamodb",
+          "endpoint": "https://dynamodb.us-east-1.amazonaws.com",
+          "region": "us-east-1",
+          "cacheTablename": "ZotBlobTable",
+          "repoMetaTablename": "ZotRepoMetadataTable",
+          "imageMetaTablename": "ZotImageMetaTable",
+          "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+          "userDataTablename": "ZotUserDataTable",
+          "versionTablename": "ZotVersion",
+          "apiKeyTablename": "ZotApiKeyTable"
+        }
+      },
+      "http": {
+        "address": "10.0.0.3",
+        "port": "9000"
+      },
+      "log": { "level": "info" },
+      "cluster": {
+        "members": [
+          "10.0.0.1:9000",
+          "10.0.0.2:9000",
+          "10.0.0.3:9000"
+        ],
+        "hashKey": "loremipsumdolors"
+      }
+    }
+    ```
+
+    </CodeGroup>
+  </Step>
+
+  <Step title="Deploy a load balancer">
+    Place an L7 load balancer in front of the cluster. Because zot performs internal request proxying, any member can receive any request — round-robin distribution works correctly.
+
+    The example below uses HAProxy with cookie-based session affinity, which reduces unnecessary inter-node proxying by steering repeat pushes and pulls for the same session to the same backend.
+
+    ```text haproxy.cfg
+    frontend zot
+        bind *:8080
+        default_backend zot-cluster
+
+    backend zot-cluster
+        balance roundrobin
+        cookie SERVER insert indirect nocache
+        server zot0 10.0.0.1:9000 cookie zot0
+        server zot1 10.0.0.2:9000 cookie zot1
+        server zot2 10.0.0.3:9000 cookie zot2
+    ```
+
+    <Info>
+    Session affinity is optional. Without it, every request is routed to a random member, which may cause extra intra-cluster proxy hops. Functionality is not affected either way.
+    </Info>
+  </Step>
+
+  <Step title="Start each member">
+    Launch each zot instance with its own configuration file:
+
+    ```bash
+    # On each node
+    zot serve /etc/zot/config-cluster-memberN.json
+    ```
+
+    Confirm the cluster is healthy by checking the readiness endpoint on each member:
+
+    ```bash
+    curl http://10.0.0.1:9000/readyz
+    curl http://10.0.0.2:9000/readyz
+    curl http://10.0.0.3:9000/readyz
+    ```
+  </Step>
+</Steps>
+
+## Redis as a cache driver
+
+Redis can replace DynamoDB as the remote cache driver. This is useful when running outside AWS or when a managed Redis service is already available.
+
+<Tabs>
+  <Tab title="Standalone Redis">
+
+    ```json
+    "cacheDriver": {
+      "name": "redis",
+      "url": "redis://localhost:6379",
+      "keyprefix": "zot"
+    }
+    ```
+
+  </Tab>
+  <Tab title="Redis Cluster">
+
+    Specify multiple addresses in the connection URL using repeated `addr` query parameters:
+
+    ```json
+    "cacheDriver": {
+      "name": "redis",
+      "url": "redis://user:password@host1:6379?dial_timeout=3&read_timeout=6s&addr=host2:6379&addr=host3:6379",
+      "keyprefix": "zot"
+    }
+    ```
+
+  </Tab>
+  <Tab title="Redis Sentinel">
+
+    Use the `master_name` field to enable Sentinel mode. Provide the Sentinel addresses in the `addr` array:
+
+    ```json
+    "cacheDriver": {
+      "name": "redis",
+      "keyprefix": "zot",
+      "addr": ["sentinel1:26379", "sentinel2:26379", "sentinel3:26379"],
+      "master_name": "zotmeta",
+      "sentinel_username": "sentineluser",
+      "sentinel_password": "sentinelpass"
+    }
+    ```
+
+  </Tab>
+  <Tab title="All Redis options">
+
+    ```json
+    "cacheDriver": {
+      "name": "redis",
+      "keyprefix": "zot",
+      "addr": ["host1:6379", "host2:6379", "host3:6379"],
+      "client_name": "client",
+      "db": 1,
+      "protocol": 3,
+      "username": "user1",
+      "password": "pass1",
+      "sentinel_username": "user2",
+      "sentinel_password": "pass2",
+      "max_retries": 3,
+      "min_retry_backoff": "5s",
+      "max_retry_backoff": "5s",
+      "dial_timeout": "5s",
+      "read_timeout": "5s",
+      "write_timeout": "5s",
+      "pool_size": 3,
+      "pool_timeout": "5s",
+      "min_idle_conns": 1,
+      "max_idle_conns": 3,
+      "max_active_conns": 3,
+      "conn_max_idle_time": "5s",
+      "conn_max_lifetime": "5s",
+      "master_name": "zotmeta"
+    }
+    ```
+
+  </Tab>
+</Tabs>
+
+## Session store with Redis
+
+When running zot with browser-based authentication (OpenID, API keys) behind a cluster, HTTP sessions must be stored in a shared backend so any member can validate a session established on another node. Configure this with `auth.sessionDriver`:
+
+```json
+{
+  "http": {
+    "auth": {
+      "htpasswd": { "path": "/etc/zot/htpasswd" },
+      "sessionDriver": {
+        "name": "redis",
+        "url": "redis://localhost:6379",
+        "keyprefix": "zotsession"
+      }
+    }
+  }
+}
+```
+
+<Warning>
+Without a shared session store, users will be logged out whenever the load balancer routes them to a different cluster member.
+</Warning>
+
+## Load balancer requirements
+
+The load balancer must:
+
+- Forward all OCI distribution API paths (`/v2/`, `/livez`, `/readyz`) to the backend pool.
+- Support HTTP/1.1 keep-alive — the OCI push protocol requires persistent connections during chunked blob uploads.
+- Not terminate or alter the `Authorization` header.
+
+Health checks should target `/readyz` on each member. Members that fail `/readyz` should be removed from the backend pool.

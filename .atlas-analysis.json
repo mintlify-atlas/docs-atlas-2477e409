@@ -1,24 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Zotregistry",
+  "projectType": "infrastructure",
+  "projectName": "zot",
+  "projectDescription": "A production-ready, vendor-neutral OCI-native container image and artifact registry built purely on the OCI Distribution Specification.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#8e8c8c",
-    "light": "#2d262d",
-    "dark": "#cccbcc"
-  },
-  "favicon": "https://media.brand.dev/bb06ce00-c48c-4516-ae38-9f58e698b69a.svg",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/project-zot/zot"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/project-zot/zot"
-    }
-  },
+  "primaryColor": "#8e8c8c",
+  "lightColor": "#2d262d",
+  "darkColor": "#cccbcc",
   "navigation": {
     "tabs": [
       {
@@ -91,5 +78,33 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "OCI Distribution Specification compliance",
+    "Multiple storage backends (local filesystem, S3, GCS)",
+    "Authentication via htpasswd, LDAP, OpenID Connect, mTLS",
+    "Role-based access control (RBAC)",
+    "Registry sync/mirroring across registries",
+    "GraphQL-powered image search and CVE scanning",
+    "Image trust via Cosign and Notation",
+    "Scale-out clustering with Redis",
+    "Prometheus metrics and UI",
+    "Built-in image scrubbing and garbage collection",
+    "CLI client (zli) for managing the registry"
+  ],
+  "publicApiSurface": [
+    "GET /v2/ — API version check",
+    "GET /v2/<name>/tags/list — List image tags",
+    "GET /v2/<name>/manifests/<reference> — Get manifest",
+    "PUT /v2/<name>/manifests/<reference> — Push manifest",
+    "DELETE /v2/<name>/manifests/<reference> — Delete manifest",
+    "GET /v2/<name>/blobs/<digest> — Get blob",
+    "POST /v2/<name>/blobs/uploads/ — Initiate blob upload",
+    "PUT /v2/<name>/blobs/uploads/<uuid> — Complete blob upload",
+    "DELETE /v2/<name>/blobs/<digest> — Delete blob",
+    "GET /v2/_catalog — List repositories",
+    "POST /v2/_zot/ext/search (GraphQL) — Search images and CVEs",
+    "GET /metrics — Prometheus metrics endpoint",
+    "GET /livez, /readyz, /startupz — Health check endpoints"
+  ]
 }

@@ -1,0 +1,449 @@
+---
+title: "Cloud storage backends"
+description: "Use Amazon S3 or Google Cloud Storage as zot's storage backend, with DynamoDB as a remote cache."
+---
+
+By default, zot stores all image data on the local filesystem. You can instead point zot at a cloud object store so that the registry process itself is stateless and restartable without data loss.
+
+Two storage drivers are supported:
+
+- **Amazon S3** (and S3-compatible stores such as MinIO)
+- **Google Cloud Storage (GCS)**
+
+For S3 deployments, zot can also use **Amazon DynamoDB** as a remote cache for deduplication metadata, which is required when running multiple zot instances against the same bucket.
+
+---
+
+## Amazon S3
+
+<Note>
+  Your zot process needs the following IAM permissions on the target bucket:
+
+  - `s3:GetObject`
+  - `s3:PutObject`
+  - `s3:DeleteObject`
+  - `s3:ListBucket`
+  - `s3:GetBucketLocation`
+
+  For DynamoDB caching, add `dynamodb:GetItem`, `dynamodb:PutItem`, `dynamodb:DeleteItem`, `dynamodb:Query`, and `dynamodb:CreateTable` on each table.
+</Note>
+
+### Basic S3 configuration
+
+The `storageDriver` block replaces the local filesystem. Set `rootDirectory` to a local temp path (used for in-flight uploads) and `storageDriver.rootdirectory` to the prefix under which zot stores objects inside the bucket.
+
+```json
+{
+    "distSpecVersion": "1.1.1",
+    "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": true,
+        "storageDriver": {
+            "name": "s3",
+            "rootdirectory": "/zot",
+            "region": "us-east-2",
+            "bucket": "zot-storage",
+            "forcepathstyle": true,
+            "secure": true,
+            "skipverify": false
+        },
+        "cacheDriver": {
+            "name": "dynamodb",
+            "endpoint": "http://localhost:4566",
+            "region": "us-east-2",
+            "cacheTablename": "MainTable"
+        }
+    },
+    "http": {
+        "address": "127.0.0.1",
+        "port": "8080"
+    },
+    "log": {
+        "level": "debug"
+    }
+}
+```
+
+### S3 parameter reference
+
+| Parameter | Required | Description |
+|---|---|---|
+| `name` | Yes | Must be `"s3"`. |
+| `rootdirectory` | Yes | Object key prefix inside the bucket (e.g. `"/zot"`). |
+| `region` | Yes | AWS region (e.g. `"us-east-2"`). |
+| `bucket` | Yes | Name of the S3 bucket. |
+| `regionendpoint` | No | Override the S3 endpoint URL — useful for S3-compatible stores or LocalStack. |
+| `forcepathstyle` | No | Use path-style addressing (`bucket.s3.amazonaws.com/key` vs `s3.amazonaws.com/bucket/key`). Required for MinIO. |
+| `secure` | No | Use HTTPS. Defaults to `true`. |
+| `skipverify` | No | Skip TLS certificate verification. Use only in development. |
+
+### Credentials
+
+zot delegates credential lookup to the AWS SDK default credential chain:
+
+1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`)
+2. AWS shared credentials file (`~/.aws/credentials`)
+3. IAM role attached to the instance or pod (recommended for production)
+
+For Kubernetes deployments, use [IRSA](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html) (IAM Roles for Service Accounts) to avoid long-lived credentials.
+
+### S3 with sub-paths
+
+You can route different repository prefixes to different S3 buckets or sub-directories. Each sub-path gets its own `storageDriver` configuration and an optional `cacheDriver`.
+
+```json
+{
+    "distSpecVersion": "1.1.1",
+    "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": true,
+        "storageDriver": {
+            "name": "s3",
+            "rootdirectory": "/zot",
+            "region": "us-east-2",
+            "bucket": "zot-storage",
+            "forcepathstyle": true,
+            "secure": true,
+            "skipverify": false
+        },
+        "cacheDriver": {
+            "name": "dynamodb",
+            "endpoint": "http://localhost:4566",
+            "region": "us-east-2",
+            "cacheTablename": "MainTable"
+        },
+        "subPaths": {
+            "/a": {
+                "rootDirectory": "/tmp/zot1",
+                "dedupe": false,
+                "storageDriver": {
+                    "name": "s3",
+                    "rootdirectory": "/zot-a",
+                    "region": "us-east-2",
+                    "bucket": "zot-storage",
+                    "forcepathstyle": true,
+                    "secure": true,
+                    "skipverify": false
+                }
+            },
+            "/b": {
+                "rootDirectory": "/tmp/zot2",
+                "dedupe": true,
+                "remoteCache": false,
+                "storageDriver": {
+                    "name": "s3",
+                    "rootdirectory": "/zot-b",
+                    "region": "us-east-2",
+                    "bucket": "zot-storage",
+                    "forcepathstyle": true,
+                    "secure": true,
+                    "skipverify": false
+                }
+            }
+        }
+    },
+    "http": {
+        "address": "127.0.0.1",
+        "port": "8080"
+    },
+    "log": {
+        "level": "debug"
+    }
+}
+```
+
+---
+
+## Google Cloud Storage
+
+The GCS driver requires a service account JSON credentials file. Set `credentialsFile` to the path where you mount the key.
+
+```json
+{
+  "storage": {
+    "rootDirectory": "/tmp/zot",
+    "dedupe": false,
+    "storageDriver": {
+      "name": "gcs",
+      "rootdirectory": "/zot",
+      "bucket": "zot-storage",
+      "credentialsFile": "/path/to/gcs-credentials.json"
+    }
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "8080"
+  },
+  "log": {
+    "level": "debug"
+  }
+}
+```
+
+### GCS parameter reference
+
+| Parameter | Required | Description |
+|---|---|---|
+| `name` | Yes | Must be `"gcs"`. |
+| `rootdirectory` | Yes | Object prefix inside the bucket. |
+| `bucket` | Yes | Name of the GCS bucket. |
+| `credentialsFile` | No | Path to a service account JSON key. Omit when using Workload Identity or Application Default Credentials. |
+
+<Tip>
+  On Google Kubernetes Engine (GKE), use Workload Identity. Annotate your Kubernetes ServiceAccount with the GCP service account email and omit `credentialsFile` — the GCS SDK picks up the token automatically.
+</Tip>
+
+---
+
+## DynamoDB remote cache
+
+When `dedupe` is enabled with S3 storage, zot needs to track which blobs are duplicated. On a single node this is handled by a local BoltDB file, but for multi-node or stateless deployments you must use a DynamoDB cache instead.
+
+Set `remoteCache: true` and configure `cacheDriver` with a DynamoDB endpoint and the table names zot should create and use.
+
+```json
+{
+    "distSpecVersion": "1.1.1",
+    "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": true,
+        "remoteCache": true,
+        "storageDriver": {
+            "name": "s3",
+            "rootdirectory": "/zot",
+            "region": "us-east-2",
+            "regionendpoint": "localhost:4566",
+            "bucket": "zot-storage",
+            "forcepathstyle": true,
+            "secure": false,
+            "skipverify": false
+        },
+        "cacheDriver": {
+            "name": "dynamodb",
+            "endpoint": "http://localhost:4566",
+            "region": "us-east-2",
+            "cacheTablename": "ZotBlobTable",
+            "repoMetaTablename": "ZotRepoMetadataTable",
+            "imageMetaTablename": "ZotImageMetaTable",
+            "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+            "userDataTablename": "ZotUserDataTable",
+            "apiKeyTablename": "ZotApiKeyTable",
+            "versionTablename": "ZotVersion"
+        }
+    },
+    "http": {
+        "address": "127.0.0.1",
+        "port": "8080"
+    },
+    "log": {
+        "level": "debug"
+    }
+}
+```
+
+### DynamoDB parameter reference
+
+| Parameter | Description |
+|---|---|
+| `name` | Must be `"dynamodb"`. |
+| `endpoint` | DynamoDB endpoint URL. Omit for AWS (uses regional endpoint). Use `http://localhost:4566` for LocalStack. |
+| `region` | AWS region. |
+| `cacheTablename` | Table for blob deduplication. |
+| `repoMetaTablename` | Table for repository metadata. |
+| `imageMetaTablename` | Table for image metadata. |
+| `repoBlobsInfoTablename` | Table for per-repo blob information. |
+| `userDataTablename` | Table for user data (API keys, starred repos). |
+| `apiKeyTablename` | Table for API key storage. |
+| `versionTablename` | Table used for schema version tracking. |
+
+<Note>
+  zot creates the DynamoDB tables automatically on first start if they do not exist. The IAM principal running zot needs `dynamodb:CreateTable` permission, or you can create the tables in advance with `dynamodb:PutItem` / `dynamodb:GetItem` permissions only.
+</Note>
+
+---
+
+## Fully remote configuration (all-remote)
+
+The `config-all-remote.json` example combines S3 storage, DynamoDB caching, and disables the local filesystem for data:
+
+```json
+{
+    "distSpecVersion": "1.1.1",
+    "storage": {
+        "dedupe": true,
+        "remoteCache": true,
+        "storageDriver": {
+            "name": "s3",
+            "rootdirectory": "/zot",
+            "region": "us-east-2",
+            "regionendpoint": "localhost:4566",
+            "bucket": "zot-storage",
+            "forcepathstyle": true,
+            "secure": false,
+            "skipverify": false
+        },
+        "cacheDriver": {
+            "name": "dynamodb",
+            "endpoint": "http://localhost:4566",
+            "region": "us-east-2",
+            "cacheTablename": "ZotBlobTable",
+            "repoMetaTablename": "ZotRepoMetadataTable",
+            "imageMetaTablename": "ZotImageMetaTable",
+            "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+            "userDataTablename": "ZotUserDataTable",
+            "apiKeyTablename": "ZotApiKeyTable",
+            "versionTablename": "ZotVersion"
+        }
+    },
+    "http": {
+        "address": "127.0.0.1",
+        "port": "8080"
+    },
+    "log": {
+        "level": "debug"
+    },
+    "extensions": {
+      "search": {
+        "enable": false,
+        "cve": {
+          "updateInterval": "2h"
+        }
+      }
+    }
+}
+```
+
+Note that `rootDirectory` is omitted from the top-level `storage` block when using a fully remote backend — zot uses the `storageDriver` exclusively and only needs a local temp directory for in-flight uploads (set implicitly).
+
+---
+
+## Cloud storage with sync
+
+You can combine cloud storage with the sync extension to mirror images from upstream registries directly into S3. The following example polls an upstream registry every 30 minutes and stores all images in S3 with a DynamoDB cache:
+
+```json
+{
+    "distSpecVersion": "1.1.1",
+    "storage": {
+        "rootDirectory": "/tmp/zot",
+        "dedupe": true,
+        "gc": true,
+        "remoteCache": true,
+        "storageDriver": {
+            "name": "s3",
+            "rootdirectory": "/zot",
+            "region": "us-east-2",
+            "bucket": "zot-storage",
+            "forcepathstyle": true,
+            "secure": true,
+            "skipverify": false
+        },
+        "cacheDriver": {
+            "name": "dynamodb",
+            "region": "us-east-2",
+            "cacheTablename": "BlobTable"
+        }
+    },
+    "http": {
+        "address": "0.0.0.0",
+        "port": "8080"
+    },
+    "log": {
+        "level": "debug"
+    },
+    "extensions": {
+        "sync": {
+            "downloadDir": "/tmp/sync",
+            "registries": [
+                {
+                    "urls": [
+                        "http://localhost:5000"
+                    ],
+                    "onDemand": false,
+                    "tlsVerify": false,
+                    "pollInterval": "30m",
+                    "content": [
+                        {
+                            "prefix": "**"
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}
+```
+
+---
+
+## Scale-out cluster with cloud storage
+
+Multiple zot instances can share the same S3 bucket and DynamoDB tables to form a scale-out cluster. Each member declares the full list of cluster members and a shared `hashKey` used for consistent hashing of requests.
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/tmp/zot",
+    "dedupe": false,
+    "remoteCache": true,
+    "storageDriver": {
+      "name": "s3",
+      "rootdirectory": "/zot",
+      "region": "us-east-1",
+      "bucket": "zot-storage",
+      "forcepathstyle": true,
+      "secure": false,
+      "skipverify": false
+    },
+    "cacheDriver": {
+      "name": "dynamodb",
+      "endpoint": "http://localhost:4566",
+      "region": "us-east-1",
+      "cacheTablename": "ZotBlobTable",
+      "repoMetaTablename": "ZotRepoMetadataTable",
+      "imageMetaTablename": "ZotImageMetaTable",
+      "repoBlobsInfoTablename": "ZotRepoBlobsInfoTable",
+      "userDataTablename": "ZotUserDataTable",
+      "versionTablename": "ZotVersion",
+      "apiKeyTablename": "ZotApiKeyTable"
+    }
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "9000"
+  },
+  "log": {
+    "level": "debug"
+  },
+  "cluster": {
+    "members": [
+      "127.0.0.1:9000",
+      "127.0.0.1:9001",
+      "127.0.0.1:9002"
+    ],
+    "hashKey": "loremipsumdolors"
+  }
+}
+```
+
+Place an HAProxy (or any Layer 7 load balancer) in front of the cluster members:
+
+```
+frontend zot
+    bind *:8080
+    default_backend zot-cluster
+
+backend zot-cluster
+    balance roundrobin
+    cookie SERVER insert indirect nocache
+    server zot0 127.0.0.1:9000 cookie zot0
+    server zot1 127.0.0.1:9001 cookie zot1
+    server zot2 127.0.0.1:9002 cookie zot2
+```
+
+Each member must have the same `cluster.members` list and `cluster.hashKey`. Requests are routed to the member that owns the repository based on consistent hashing, and the load balancer uses sticky cookies to forward follow-up requests (such as chunked uploads) to the same member.
+
+<Warning>
+  All members in a cluster must use `remoteCache: true` with DynamoDB. A local BoltDB cache is not shared across members and will cause data inconsistency.
+</Warning>

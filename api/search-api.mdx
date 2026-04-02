@@ -1,0 +1,569 @@
+---
+title: "Search API (GraphQL)"
+description: "Use zot's GraphQL search extension to query images, repositories, CVEs, and more."
+---
+
+zot includes an optional search extension that exposes a GraphQL API for querying images, repositories, vulnerability data, and artifact relationships. The endpoint is available when the search extension is enabled in the server configuration.
+
+## Endpoint
+
+```
+POST /v2/_zot/ext/search
+```
+
+The endpoint accepts standard GraphQL requests as JSON:
+
+```json
+{
+  "query": "{ ... }",
+  "variables": { }
+}
+```
+
+### Example request
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query": "{ ImageList(repo: \"myorg/myapp\") { Results { Tag Digest } } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+<Info>
+All GraphQL queries in this reference are sent as the `query` field in a JSON POST body. Variables are passed as the `variables` field.
+</Info>
+
+---
+
+## Pagination
+
+Most list queries accept a `requestedPage` argument of type `PageInput`:
+
+<ParamField body="limit" type="integer">
+  Maximum number of results to return. Omit for no limit.
+</ParamField>
+
+<ParamField body="offset" type="integer">
+  Number of results to skip (zero-based). Omit to start from the beginning.
+</ParamField>
+
+<ParamField body="sortBy" type="SortCriteria">
+  Sort order for results. Available values: `RELEVANCE`, `UPDATE_TIME`, `ALPHABETIC_ASC`, `ALPHABETIC_DSC`, `SEVERITY`, `STARS`, `DOWNLOADS`. Not all criteria apply to all queries.
+</ParamField>
+
+Paginated responses include a `Page` field:
+
+<ResponseField name="Page.TotalCount" type="integer">
+  Total number of matching objects across all pages.
+</ResponseField>
+
+<ResponseField name="Page.ItemCount" type="integer">
+  Number of objects returned in this page.
+</ResponseField>
+
+---
+
+## Filtering
+
+Image and repository queries accept a `filter` argument of type `Filter`:
+
+<ParamField body="Os" type="string[]">
+  Only return images supporting these operating systems (e.g., `["linux"]`).
+</ParamField>
+
+<ParamField body="Arch" type="string[]">
+  Only return images supporting these architectures (e.g., `["amd64", "arm64"]`).
+</ParamField>
+
+<ParamField body="HasToBeSigned" type="boolean">
+  When `true`, only return images that have at least one signature.
+</ParamField>
+
+<ParamField body="IsBookmarked" type="boolean">
+  Filter by the current user's bookmark status.
+</ParamField>
+
+<ParamField body="IsStarred" type="boolean">
+  Filter by the current user's star status.
+</ParamField>
+
+---
+
+## Queries
+
+### ImageList
+
+List all images in a repository, or all images across all repositories.
+
+```
+ImageList(repo: String!, requestedPage: PageInput): PaginatedImagesResult!
+```
+
+<ParamField body="repo" type="string" required>
+  Repository name. Pass an empty string (`""`) to return images from all repositories.
+</ParamField>
+
+<ParamField body="requestedPage" type="PageInput">
+  Pagination and sort parameters.
+</ParamField>
+
+```graphql
+query GetImages {
+  ImageList(repo: "myorg/myapp", requestedPage: { limit: 10, offset: 0, sortBy: UPDATE_TIME }) {
+    Page {
+      TotalCount
+      ItemCount
+    }
+    Results {
+      Tag
+      Digest
+      MediaType
+      Size
+      LastUpdated
+      IsSigned
+      Vulnerabilities {
+        MaxSeverity
+        Count
+      }
+    }
+  }
+}
+```
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query { ImageList(repo: \"myorg/myapp\", requestedPage: { limit: 10, offset: 0 }) { Results { Tag Digest Size LastUpdated } Page { TotalCount } } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+---
+
+### ImageListForDigest
+
+Find all images that contain a specific layer or manifest digest.
+
+```
+ImageListForDigest(id: String!, requestedPage: PageInput): PaginatedImagesResult!
+```
+
+<ParamField body="id" type="string" required>
+  Digest to search for (e.g., `sha256:abc123...`).
+</ParamField>
+
+```graphql
+query FindImagesByDigest {
+  ImageListForDigest(id: "sha256:9d21b12d5fab9b24e1d4...") {
+    Results {
+      RepoName
+      Tag
+      Digest
+    }
+  }
+}
+```
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ ImageListForDigest(id: \"sha256:9d21b12d5fab9b24e1d4...\") { Results { RepoName Tag } } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+---
+
+### ImageListWithCVEFixed
+
+Find images in a repository where a specific CVE has been fixed.
+
+```
+ImageListWithCVEFixed(
+  id: String!,
+  image: String!,
+  filter: Filter,
+  requestedPage: PageInput
+): PaginatedImagesResult!
+```
+
+<ParamField body="id" type="string" required>
+  CVE ID (e.g., `CVE-2021-44228`).
+</ParamField>
+
+<ParamField body="image" type="string" required>
+  Repository name to search within.
+</ParamField>
+
+```graphql
+query ImagesWithCVEFixed {
+  ImageListWithCVEFixed(id: "CVE-2021-44228", image: "myorg/myapp") {
+    Results {
+      Tag
+      Digest
+      LastUpdated
+      Vulnerabilities {
+        MaxSeverity
+        Count
+      }
+    }
+  }
+}
+```
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ ImageListWithCVEFixed(id: \"CVE-2021-44228\", image: \"myorg/myapp\") { Results { Tag Digest } } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+---
+
+### CVEListForImage
+
+List all CVEs affecting a specific image.
+
+```
+CVEListForImage(
+  image: String!,
+  requestedPage: PageInput,
+  searchedCVE: String,
+  excludedCVE: String,
+  severity: String
+): CVEResultForImage!
+```
+
+<ParamField body="image" type="string" required>
+  Image in the format `repository:tag` or `repository@digest` (e.g., `myorg/myapp:v1.0.0`).
+</ParamField>
+
+<ParamField body="searchedCVE" type="string">
+  Filter results to CVEs matching this ID or title substring.
+</ParamField>
+
+<ParamField body="excludedCVE" type="string">
+  Exclude CVEs matching this string from results.
+</ParamField>
+
+<ParamField body="severity" type="string">
+  Only return CVEs with this severity level: `UNKNOWN`, `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`.
+</ParamField>
+
+```graphql
+query CVEsForImage {
+  CVEListForImage(
+    image: "myorg/myapp:v1.0.0",
+    requestedPage: { limit: 20, offset: 0, sortBy: SEVERITY },
+    severity: "HIGH"
+  ) {
+    Tag
+    Summary {
+      MaxSeverity
+      Count
+      CriticalCount
+      HighCount
+      MediumCount
+      LowCount
+    }
+    CVEList {
+      Id
+      Title
+      Description
+      Severity
+      PackageList {
+        Name
+        InstalledVersion
+        FixedVersion
+      }
+    }
+    Page {
+      TotalCount
+      ItemCount
+    }
+  }
+}
+```
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ CVEListForImage(image: \"myorg/myapp:v1.0.0\", requestedPage: { limit: 10 }) { CVEList { Id Title Severity } Summary { MaxSeverity Count } } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+---
+
+### CVEDiffListForImages
+
+Compare CVEs between two images: returns CVEs present in `minuend` but not in `subtrahend`.
+
+```
+CVEDiffListForImages(
+  minuend: ImageInput!,
+  subtrahend: ImageInput!,
+  requestedPage: PageInput,
+  searchedCVE: String,
+  excludedCVE: String
+): CVEDiffResult!
+```
+
+<ParamField body="minuend" type="ImageInput" required>
+  The base image (CVEs are taken from this image).
+  <Expandable title="ImageInput fields">
+    <ParamField body="Repo" type="string" required>Repository name.</ParamField>
+    <ParamField body="Tag" type="string" required>Image tag.</ParamField>
+    <ParamField body="Digest" type="string">Optional manifest digest.</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="subtrahend" type="ImageInput" required>
+  The comparison image (CVEs present in this image are subtracted).
+</ParamField>
+
+```graphql
+query CompareCVEs {
+  CVEDiffListForImages(
+    minuend: { Repo: "myorg/myapp", Tag: "v1.0.0" },
+    subtrahend: { Repo: "myorg/myapp", Tag: "v1.1.0" }
+  ) {
+    Minuend { Repo Tag }
+    Subtrahend { Repo Tag }
+    CVEList {
+      Id
+      Title
+      Severity
+    }
+    Summary {
+      Count
+      MaxSeverity
+    }
+  }
+}
+```
+
+---
+
+### DerivedImageList
+
+Find images that are derived from (i.e., use as a base) a specific image.
+
+```
+DerivedImageList(
+  image: String!,
+  digest: String,
+  requestedPage: PageInput
+): PaginatedImagesResult!
+```
+
+<ParamField body="image" type="string" required>
+  Image name in the format `repository:tag`.
+</ParamField>
+
+<ParamField body="digest" type="string">
+  Specific manifest digest within a multi-arch image. When omitted, the whole image is considered.
+</ParamField>
+
+```graphql
+query DerivedImages {
+  DerivedImageList(image: "library/alpine:3.18") {
+    Results {
+      RepoName
+      Tag
+      Digest
+      LastUpdated
+    }
+    Page {
+      TotalCount
+    }
+  }
+}
+```
+
+---
+
+### BaseImageList
+
+Find base images that a specific image depends on.
+
+```
+BaseImageList(
+  image: String!,
+  digest: String,
+  requestedPage: PageInput
+): PaginatedImagesResult!
+```
+
+<ParamField body="image" type="string" required>
+  Image name in the format `repository:tag`.
+</ParamField>
+
+```graphql
+query BaseImages {
+  BaseImageList(image: "myorg/myapp:v1.0.0") {
+    Results {
+      RepoName
+      Tag
+      Digest
+    }
+  }
+}
+```
+
+---
+
+### Referrers
+
+List OCI referrers for a specific manifest digest in a repository.
+
+```
+Referrers(
+  repo: String!,
+  digest: String!,
+  type: [String!]
+): [Referrer]!
+```
+
+<ParamField body="repo" type="string" required>
+  Repository name.
+</ParamField>
+
+<ParamField body="digest" type="string" required>
+  Digest of the manifest to find referrers for.
+</ParamField>
+
+<ParamField body="type" type="string[]">
+  Filter referrers by artifact type. When omitted, all referrers are returned.
+</ParamField>
+
+```graphql
+query GetReferrers {
+  Referrers(
+    repo: "myorg/myapp",
+    digest: "sha256:abc123...",
+    type: ["application/vnd.cncf.notary.signature"]
+  ) {
+    MediaType
+    ArtifactType
+    Digest
+    Size
+    Annotations {
+      Key
+      Value
+    }
+  }
+}
+```
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ Referrers(repo: \"myorg/myapp\", digest: \"sha256:abc123...\") { ArtifactType Digest Size } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+---
+
+### GlobalSearch
+
+Full-text search across repositories, images, and layers.
+
+```
+GlobalSearch(
+  query: String!,
+  filter: Filter,
+  requestedPage: PageInput
+): GlobalSearchResult!
+```
+
+<ParamField body="query" type="string" required>
+  Search term. By default, searches repository names. When the query contains `:`, it searches for tags within a specific repository (e.g., `myorg/myapp:v1`).
+</ParamField>
+
+<ParamField body="filter" type="Filter">
+  Filter results by OS, architecture, or signature status.
+</ParamField>
+
+```graphql
+query Search {
+  GlobalSearch(
+    query: "myapp",
+    requestedPage: { limit: 10, offset: 0, sortBy: RELEVANCE }
+  ) {
+    Page {
+      TotalCount
+      ItemCount
+    }
+    Repos {
+      Name
+      LastUpdated
+      StarCount
+      DownloadCount
+      Vendors
+      NewestImage {
+        Tag
+        Digest
+      }
+    }
+    Images {
+      RepoName
+      Tag
+      Digest
+      Size
+      LastUpdated
+    }
+  }
+}
+```
+
+```bash
+# Search for repositories matching "nginx"
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ GlobalSearch(query: \"nginx\", requestedPage: { limit: 5 }) { Repos { Name StarCount } Images { RepoName Tag } } }"}' \
+  https://registry.example.com:5000/v2/_zot/ext/search
+```
+
+---
+
+## Key types
+
+### ImageSummary
+
+Describes a specific image (a repository/tag pairing).
+
+<ResponseField name="RepoName" type="string">Repository name.</ResponseField>
+<ResponseField name="Tag" type="string">Image tag.</ResponseField>
+<ResponseField name="Digest" type="string">Manifest descriptor digest.</ResponseField>
+<ResponseField name="MediaType" type="string">Media type of the manifest descriptor.</ResponseField>
+<ResponseField name="Size" type="string">Total size of all associated files in bytes.</ResponseField>
+<ResponseField name="LastUpdated" type="Time">Timestamp of the most recent modification.</ResponseField>
+<ResponseField name="PushTimestamp" type="Time">When the image was pushed to the registry.</ResponseField>
+<ResponseField name="IsSigned" type="boolean">Whether the image has an associated signature.</ResponseField>
+<ResponseField name="Vulnerabilities" type="ImageVulnerabilitySummary">Summary of CVE findings.</ResponseField>
+<ResponseField name="Manifests" type="ManifestSummary[]">Per-platform manifest details for multi-arch images.</ResponseField>
+<ResponseField name="Referrers" type="Referrer[]">Objects that reference this image.</ResponseField>
+
+### CVE
+
+<ResponseField name="Id" type="string">CVE identifier (e.g., `CVE-2021-44228`).</ResponseField>
+<ResponseField name="Title" type="string">Short title for the CVE.</ResponseField>
+<ResponseField name="Description" type="string">Detailed description.</ResponseField>
+<ResponseField name="Severity" type="string">Severity level: `UNKNOWN`, `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`.</ResponseField>
+<ResponseField name="PackageList" type="PackageInfo[]">
+  Affected packages.
+  <Expandable title="PackageInfo fields">
+    <ResponseField name="Name" type="string">Package name.</ResponseField>
+    <ResponseField name="PackagePath" type="string">Path where the vulnerable package is located.</ResponseField>
+    <ResponseField name="InstalledVersion" type="string">Currently installed version.</ResponseField>
+    <ResponseField name="FixedVersion" type="string">Minimum version in which the CVE is fixed.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Platform
+
+<ResponseField name="Os" type="string">Operating system (e.g., `linux`, `windows`).</ResponseField>
+<ResponseField name="Arch" type="string">CPU architecture (e.g., `amd64`, `arm64`).</ResponseField>
+
+### PageInfo
+
+<ResponseField name="TotalCount" type="integer">Total number of matching objects across all pages.</ResponseField>
+<ResponseField name="ItemCount" type="integer">Number of objects in the current page.</ResponseField>

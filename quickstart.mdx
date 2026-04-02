@@ -1,80 +1,265 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Run a zot registry and push your first image in under five minutes."
 ---
 
-## Get started in three steps
+Choose how you want to run zot: with Docker for the fastest start, or with a binary if you prefer not to use containers.
 
-Get your documentation site running locally and make your first customization.
+<Tabs>
+  <Tab title="Docker">
+    <Steps>
+      <Step title="Pull the image">
+        Pull the official zot image from GitHub Container Registry:
 
-### Step 1: Set up your local environment
+        ```bash
+        docker pull ghcr.io/project-zot/zot-linux-amd64:latest
+        ```
+      </Step>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+      <Step title="Create a config file">
+        Create a minimal `config.json` in your working directory:
 
-### Step 2: Deploy your changes
+        ```json config.json
+        {
+          "distSpecVersion": "1.1.1",
+          "storage": {
+            "rootDirectory": "/var/lib/registry"
+          },
+          "http": {
+            "address": "0.0.0.0",
+            "port": "5000"
+          },
+          "log": {
+            "level": "info"
+          }
+        }
+        ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+        <Note>
+          `address: "0.0.0.0"` makes the registry reachable from outside the container. For production, bind to a specific interface and enable TLS.
+        </Note>
+      </Step>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+      <Step title="Start the registry">
+        Mount the config file and a data volume, then start the container:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+        ```bash
+        docker run -d \
+          --name zot \
+          -p 5000:5000 \
+          -v $(pwd)/config.json:/etc/zot/config.json \
+          -v zot-data:/var/lib/registry \
+          ghcr.io/project-zot/zot-linux-amd64:latest \
+          serve /etc/zot/config.json
+        ```
 
-### Step 3: Go live
+        Verify the registry is up:
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+        ```bash
+        curl http://localhost:5000/v2/
+        ```
+
+        Expected response:
+
+        ```json
+        {}
+        ```
+      </Step>
+
+      <Step title="Push an image">
+        Tag a local image and push it to the registry:
+
+        ```bash
+        docker tag ubuntu:22.04 localhost:5000/ubuntu:22.04
+        docker push localhost:5000/ubuntu:22.04
+        ```
+      </Step>
+
+      <Step title="Pull the image back">
+        ```bash
+        docker pull localhost:5000/ubuntu:22.04
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+
+  <Tab title="Binary">
+    <Steps>
+      <Step title="Download the binary">
+        Download the latest release from [GitHub Releases](https://github.com/project-zot/zot/releases/latest).
+
+        For Linux on amd64:
+
+        ```bash
+        curl -Lo zot https://github.com/project-zot/zot/releases/latest/download/zot-linux-amd64
+        chmod +x zot
+        sudo mv zot /usr/local/bin/zot
+        ```
+
+        Verify the installation:
+
+        ```bash
+        zot --version
+        ```
+      </Step>
+
+      <Step title="Create a config file">
+        Create a minimal `config.json`:
+
+        ```json config.json
+        {
+          "distSpecVersion": "1.1.1",
+          "storage": {
+            "rootDirectory": "/tmp/zot"
+          },
+          "http": {
+            "address": "127.0.0.1",
+            "port": "5000"
+          },
+          "log": {
+            "level": "info"
+          }
+        }
+        ```
+
+        You can validate the config before starting:
+
+        ```bash
+        zot verify config.json
+        ```
+      </Step>
+
+      <Step title="Start the registry">
+        ```bash
+        zot serve config.json
+        ```
+
+        In another terminal, check that the registry is responding:
+
+        ```bash
+        curl http://127.0.0.1:5000/v2/
+        ```
+      </Step>
+
+      <Step title="Push an image">
+        ```bash
+        docker tag ubuntu:22.04 localhost:5000/ubuntu:22.04
+        docker push localhost:5000/ubuntu:22.04
+        ```
+      </Step>
+
+      <Step title="Pull the image back">
+        ```bash
+        docker pull localhost:5000/ubuntu:22.04
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Verify OCI compliance
+
+The `/v2/` endpoint is the OCI Distribution Spec health check. A `200 OK` response with an empty JSON object confirms the registry is running and conformant:
+
+```bash
+curl -s http://localhost:5000/v2/ | jq
+```
+
+```json
+{}
+```
+
+## List repositories
+
+Once you have pushed an image, you can list repositories through the standard OCI catalog endpoint:
+
+```bash
+curl -s http://localhost:5000/v2/_catalog | jq
+```
+
+```json
+{
+  "repositories": ["ubuntu"]
+}
+```
+
+## Using zli
+
+`zli` is the companion CLI for zot. It lets you search images, list tags, and manage API keys.
+
+<Steps>
+  <Step title="Download zli">
+    ```bash
+    curl -Lo zli https://github.com/project-zot/zot/releases/latest/download/zli-linux-amd64
+    chmod +x zli
+    sudo mv zli /usr/local/bin/zli
+    ```
+  </Step>
+
+  <Step title="Add a registry config">
+    ```bash
+    zli config add local http://localhost:5000
+    ```
+  </Step>
+
+  <Step title="List repositories">
+    ```bash
+    zli repo list --config local
+    ```
+  </Step>
+
+  <Step title="List images">
+    ```bash
+    zli image list --config local
+    ```
+  </Step>
+</Steps>
+
+## Example: config with authentication
+
+The minimal config above runs without authentication. To add htpasswd-based basic auth, generate a credentials file and reference it in the config:
+
+```bash
+# Install apache2-utils for htpasswd
+htpasswd -cB /etc/zot/htpasswd alice
+```
+
+```json config.json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      },
+      "failDelay": 5
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+Push with credentials:
+
+```bash
+docker login localhost:5000 -u alice
+docker push localhost:5000/ubuntu:22.04
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Installation" icon="download" href="/install">
+    All installation methods including Helm and building from source.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/overview">
+    Storage backends, TLS, LDAP, OpenID Connect, and access control policies.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

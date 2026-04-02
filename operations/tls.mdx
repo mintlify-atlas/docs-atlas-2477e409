@@ -1,0 +1,235 @@
+---
+title: "TLS configuration"
+description: "Secure zot with HTTPS, enforce mutual TLS client authentication, and integrate with SPIFFE/SPIRE for workload identity."
+---
+
+zot supports standard TLS for HTTPS, mutual TLS (mTLS) for client certificate authentication, and certificate hot-reloading so you can rotate certificates without restarting the server.
+
+<Tabs>
+  <Tab title="TLS (HTTPS)">
+
+## Enabling HTTPS
+
+Add a `tls` block to `http` with paths to your server certificate and private key:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "realm": "zot",
+    "tls": {
+      "cert": "/etc/zot/tls/server.crt",
+      "key": "/etc/zot/tls/server.key"
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+<ParamField path="http.tls.cert" type="string" required>
+  Path to the PEM-encoded server certificate file.
+</ParamField>
+
+<ParamField path="http.tls.key" type="string" required>
+  Path to the PEM-encoded server private key file.
+</ParamField>
+
+<ParamField path="http.tls.cacert" type="string">
+  Path to a PEM-encoded CA certificate. When present, zot requests client certificates and verifies them against this CA. This enables mutual TLS — see the mTLS tab for details.
+</ParamField>
+
+Once TLS is configured, zot automatically sets the `Secure` flag on session cookies. HTTP clients must use `https://` to connect.
+
+  </Tab>
+  <Tab title="Mutual TLS (mTLS)">
+
+## Enabling mutual TLS
+
+Mutual TLS requires clients to present a valid certificate signed by a trusted CA. Enable it by adding `cacert` to the `tls` block and setting `auth.mtls` to specify how to extract the client identity:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "realm": "zot",
+    "tls": {
+      "cert": "/etc/zot/tls/server.crt",
+      "key": "/etc/zot/tls/server.key",
+      "cacert": "/etc/zot/tls/ca.crt"
+    },
+    "auth": {
+      "mtls": {
+        "identityAttributes": ["CommonName"]
+      }
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["clientuser"],
+              "actions": ["read", "create"]
+            }
+          ],
+          "defaultPolicy": ["read"]
+        }
+      }
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+mTLS is active whenever all three of `cert`, `key`, and `cacert` are configured. The `auth.mtls` block controls how zot extracts the username from the client certificate.
+
+## Identity attributes
+
+`identityAttributes` is an ordered list of certificate fields that zot tries in sequence. The first field that yields a non-empty value becomes the authenticated username.
+
+<ParamField path="http.auth.mtls.identityAttributes" type="array of strings">
+  Ordered list of identity sources. Options (case-insensitive):
+  - `"CommonName"` — the certificate's Subject Common Name (CN). Default if not specified.
+  - `"Subject"` — the full Subject distinguished name string.
+  - `"Email"` — a Subject Alternative Name (SAN) of type email.
+  - `"URI"` — a URI SAN (used with SPIFFE).
+  - `"DNSName"` — a DNS SAN.
+</ParamField>
+
+<ParamField path="http.auth.mtls.uriSanPattern" type="string">
+  A regular expression applied to the URI SAN value when `"URI"` is in `identityAttributes`. The first capture group is extracted as the identity. If omitted, the full URI is used.
+</ParamField>
+
+<ParamField path="http.auth.mtls.uriSanIndex" type="integer">
+  Which URI SAN to use when the certificate contains multiple URI SANs (0-based). Defaults to `0`.
+</ParamField>
+
+<ParamField path="http.auth.mtls.dnsSanIndex" type="integer">
+  Which DNS SAN to use when the certificate contains multiple DNS SANs (0-based). Defaults to `0`.
+</ParamField>
+
+<ParamField path="http.auth.mtls.emailSanIndex" type="integer">
+  Which email SAN to use when the certificate contains multiple email SANs (0-based). Defaults to `0`.
+</ParamField>
+
+  </Tab>
+  <Tab title="SPIFFE/SPIRE">
+
+## SPIFFE integration
+
+SPIFFE (Secure Production Identity Framework for Everyone) assigns cryptographic workload identities as URI SANs in the form `spiffe://trust-domain/workload-path`. zot can extract the workload identifier from this URI and use it as the authenticated username.
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/registry"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "realm": "zot",
+    "tls": {
+      "cert": "/etc/zot/tls/server.crt",
+      "key": "/etc/zot/tls/server.key",
+      "cacert": "/etc/zot/tls/ca.crt"
+    },
+    "auth": {
+      "mtls": {
+        "identityAttributes": ["URI", "CommonName"],
+        "uriSanPattern": "spiffe://example.org/workload/(.*)"
+      }
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["testuser"],
+              "actions": ["read", "create"]
+            }
+          ],
+          "defaultPolicy": ["read"]
+        }
+      }
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+**How this works:**
+
+1. A SPIRE-issued certificate arrives with a URI SAN such as `spiffe://example.org/workload/testuser`.
+2. `identityAttributes: ["URI", "CommonName"]` tells zot to try the URI SAN first.
+3. `uriSanPattern: "spiffe://example.org/workload/(.*)"` extracts the capture group — `testuser` — as the identity.
+4. If no URI SAN matches (or the pattern has no match), zot falls back to `CommonName`.
+
+The extracted identity maps to users in `accessControl.repositories` policies.
+
+  </Tab>
+</Tabs>
+
+## Certificate hot-reloading
+
+zot watches certificate and key files for changes using the OS filesystem notification API (inotify on Linux, kqueue on macOS). When a change is detected, the new certificate is loaded without restarting the server or dropping existing connections.
+
+**How it works:**
+
+- A `TlsConfigWatcher` is started when TLS is configured.
+- File change events are debounced over a 150 ms window so that coordinated cert+key replacements trigger a single reload rather than two.
+- After a reload, the new certificate is served for all subsequent TLS handshakes.
+- If filesystem notifications are unavailable (for example, when the certificate is on a network filesystem), zot falls back to stat-based polling with a 1-second check interval.
+- When a file is removed or renamed (e.g., during atomic certificate rotation), the watcher retries re-attaching up to five times before falling back to polling.
+
+To rotate a certificate without downtime:
+
+```bash
+# Atomically replace the certificate files
+cp /tmp/new-server.crt /etc/zot/tls/server.crt
+cp /tmp/new-server.key /etc/zot/tls/server.key
+# zot automatically detects the change and reloads within ~150ms
+```
+
+<Tip>
+Use atomic file operations (write to a temp file, then `mv` or `rename`) to prevent zot from reading a partially written certificate. The watcher handles rename events by re-subscribing to the new file.
+</Tip>
+
+## Inter-node TLS for clusters
+
+In a clustered deployment, zot nodes proxy requests to each other over HTTP. You can secure these inter-node connections with TLS by adding a `tls` block inside `cluster`:
+
+```json
+{
+  "cluster": {
+    "members": [
+      "10.0.0.1:9000",
+      "10.0.0.2:9000",
+      "10.0.0.3:9000"
+    ],
+    "hashKey": "loremipsumdolors",
+    "tls": {
+      "cert": "/etc/zot/tls/node.crt",
+      "key": "/etc/zot/tls/node.key",
+      "cacert": "/etc/zot/tls/ca.crt"
+    }
+  }
+}
+```
+
+The `cluster.tls` block uses the same `cert`, `key`, and `cacert` fields as `http.tls`.

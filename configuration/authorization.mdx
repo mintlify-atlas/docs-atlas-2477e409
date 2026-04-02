@@ -1,0 +1,408 @@
+---
+title: "Authorization"
+description: "Configure role-based access control in zot: repository policies, user groups, admin access, anonymous access, and per-action permissions."
+---
+
+zot uses a flexible role-based access control (RBAC) system configured in `http.accessControl`. Policies define which users and groups can perform which actions on which repositories. Authorization is evaluated after authentication—you must have a verified identity (or be an anonymous client) before policies are checked.
+
+<Note>
+  If `http.accessControl` is absent from the config, all authenticated users have full access to all repositories. Add the `accessControl` section to start restricting access.
+</Note>
+
+## Access control structure
+
+```json
+{
+  "http": {
+    "accessControl": {
+      "groups": { ... },
+      "repositories": { ... },
+      "adminPolicy": { ... },
+      "metrics": { ... }
+    }
+  }
+}
+```
+
+<ParamField path="http.accessControl.repositories" type="object" required>
+  Map of repository path patterns to `PolicyGroup` objects. Repository patterns support `*` (single segment wildcard) and `**` (multi-segment wildcard).
+</ParamField>
+
+<ParamField path="http.accessControl.groups" type="object">
+  Named groups of users. Groups defined here can be referenced in repository policies by their name.
+</ParamField>
+
+<ParamField path="http.accessControl.adminPolicy" type="object">
+  Global policy granting specified users and groups unrestricted access to all repositories.
+</ParamField>
+
+<ParamField path="http.accessControl.metrics" type="object">
+  Controls which users can access the `/metrics` Prometheus endpoint.
+</ParamField>
+
+## Actions
+
+Actions define what operations a policy permits. Each action maps to one or more OCI Distribution API operations:
+
+| Action | Description |
+|--------|-------------|
+| `"read"` | Pull images, list tags, get manifests and blobs |
+| `"create"` | Push new images |
+| `"update"` | Overwrite existing tags |
+| `"delete"` | Delete images and tags |
+| `"detectManifestCollision"` | Check for manifest digest collisions |
+
+## Repository policies
+
+Each key in `repositories` is a glob pattern matching one or more repository names. The most specific matching pattern wins.
+
+```json
+{
+  "http": {
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["charlie"],
+              "groups": ["developers"],
+              "actions": ["read", "create", "update"]
+            },
+            {
+              "users": ["mary"],
+              "groups": ["group2"],
+              "actions": ["read", "create", "update", "delete"]
+            }
+          ],
+          "defaultPolicy": ["read", "create"]
+        },
+        "tmp/**": {
+          "defaultPolicy": ["read", "create", "update"]
+        },
+        "infra/*": {
+          "policies": [
+            {
+              "users": ["alice", "bob"],
+              "groups": ["maintainers", "platformteam"],
+              "actions": ["create", "read", "update", "delete"]
+            },
+            {
+              "users": ["mallory"],
+              "actions": ["create", "read"]
+            }
+          ],
+          "defaultPolicy": ["read"]
+        }
+      }
+    }
+  }
+}
+```
+
+### PolicyGroup fields
+
+<ParamField path="repositories.[pattern].policies" type="array">
+  List of explicit user/group policies for this repository pattern. Policies are evaluated in order; a user is granted the union of all matching policy actions.
+</ParamField>
+
+<ParamField path="repositories.[pattern].defaultPolicy" type="string[]">
+  Actions granted to any authenticated user who is not covered by an explicit policy entry. Common values: `["read"]` for read-only access to authenticated users.
+</ParamField>
+
+<ParamField path="repositories.[pattern].anonymousPolicy" type="string[]">
+  Actions granted to unauthenticated clients. When set, these repositories are accessible without credentials. See [Anonymous access](#anonymous-access) below.
+</ParamField>
+
+### Policy fields
+
+<ParamField path="policies[].users" type="string[]">
+  List of usernames this policy applies to. Usernames must match exactly the identity returned by the authentication method (case-sensitive).
+</ParamField>
+
+<ParamField path="policies[].groups" type="string[]">
+  List of group names this policy applies to. Groups can be:
+  - Named groups defined in `accessControl.groups`
+  - LDAP group DNs (e.g., `"cn=ldap-group,ou=Groups,dc=example,dc=org"`)
+  - Groups returned by the OIDC provider
+</ParamField>
+
+<ParamField path="policies[].actions" type="string[]" required>
+  List of actions granted by this policy entry. Must be one or more of: `"read"`, `"create"`, `"update"`, `"delete"`, `"detectManifestCollision"`.
+</ParamField>
+
+## Named groups
+
+Define reusable groups of users to avoid repeating user lists across multiple repository policies:
+
+```json
+{
+  "http": {
+    "accessControl": {
+      "groups": {
+        "group1": {
+          "users": ["jack", "john", "jane", "ana"]
+        },
+        "group2": {
+          "users": ["alice", "mike", "jim"]
+        }
+      },
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["charlie"],
+              "groups": ["admins", "developers", "group1"],
+              "actions": ["read", "create", "update"]
+            },
+            {
+              "users": ["mary"],
+              "groups": ["group2"],
+              "actions": ["read", "create", "update", "delete"]
+            }
+          ],
+          "defaultPolicy": ["read", "create"]
+        }
+      }
+    }
+  }
+}
+```
+
+## Admin policy
+
+The `adminPolicy` grants full administrative access to specified users and groups across all repositories, regardless of per-repository policies:
+
+```json
+{
+  "http": {
+    "accessControl": {
+      "adminPolicy": {
+        "users": ["admin"],
+        "groups": ["admins", "developers"],
+        "actions": ["read", "create", "update", "delete"]
+      }
+    }
+  }
+}
+```
+
+<ParamField path="http.accessControl.adminPolicy.users" type="string[]">
+  Usernames with admin access to all repositories.
+</ParamField>
+
+<ParamField path="http.accessControl.adminPolicy.groups" type="string[]">
+  Groups with admin access to all repositories.
+</ParamField>
+
+<ParamField path="http.accessControl.adminPolicy.actions" type="string[]">
+  Actions granted to admin users and groups. Typically all four: `["read", "create", "update", "delete"]`.
+</ParamField>
+
+## Anonymous access
+
+You can permit unauthenticated clients to read (or write) specific repositories using `anonymousPolicy`:
+
+```json
+{
+  "http": {
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "anonymousPolicy": ["read", "create"]
+        },
+        "tmp/**": {
+          "anonymousPolicy": ["read", "create", "update"]
+        },
+        "infra/**": {
+          "anonymousPolicy": ["read"]
+        },
+        "repos2/repo": {
+          "anonymousPolicy": ["read"]
+        }
+      }
+    }
+  }
+}
+```
+
+In this example:
+- All repositories (`**`) allow anonymous push and pull
+- `tmp/**` repositories also allow anonymous updates (tag overwrites)
+- `infra/**` and `repos2/repo` are read-only for anonymous clients
+
+<Warning>
+  Granting `"create"` or `"update"` in `anonymousPolicy` allows anyone on the network to push images without authentication. Only use this on trusted internal networks.
+</Warning>
+
+## Full policy example
+
+The following example combines all access control features: named groups, per-repository policies, a wildcard catch-all, and an admin policy:
+
+```json
+{
+  "http": {
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      }
+    },
+    "accessControl": {
+      "groups": {
+        "group1": {
+          "users": ["jack", "john", "jane", "ana"]
+        },
+        "group2": {
+          "users": ["alice", "mike", "jim"]
+        }
+      },
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["charlie"],
+              "groups": ["admins", "developers", "group1"],
+              "actions": ["read", "create", "update"]
+            },
+            {
+              "users": ["mary"],
+              "groups": ["group2"],
+              "actions": ["read", "create", "update", "delete"]
+            }
+          ],
+          "defaultPolicy": ["read", "create"]
+        },
+        "tmp/**": {
+          "defaultPolicy": ["read", "create", "update"]
+        },
+        "infra/*": {
+          "policies": [
+            {
+              "users": ["alice", "bob"],
+              "groups": ["maintainers", "platformteam"],
+              "actions": ["create", "read", "update", "delete"]
+            },
+            {
+              "users": ["mallory"],
+              "actions": ["create", "read"]
+            }
+          ],
+          "defaultPolicy": ["read"]
+        },
+        "repos2/repo": {
+          "policies": [
+            {
+              "users": ["bob"],
+              "groups": ["sparkle_team", "repo2_team"],
+              "actions": ["read", "create"]
+            },
+            {
+              "users": ["mallory"],
+              "actions": ["create", "read"]
+            }
+          ],
+          "defaultPolicy": ["read"]
+        }
+      },
+      "adminPolicy": {
+        "users": ["admin"],
+        "groups": ["admins", "developers"],
+        "actions": ["read", "create", "update", "delete"]
+      }
+    }
+  }
+}
+```
+
+## LDAP groups in policies
+
+When using LDAP authentication with `userGroupAttribute` configured, zot passes LDAP group DNs directly into the policy engine. Reference them verbatim in your policies:
+
+```json
+{
+  "http": {
+    "auth": {
+      "ldap": {
+        "address": "ldap.example.org",
+        "port": 389,
+        "baseDN": "ou=Users,dc=example,dc=org",
+        "userAttribute": "uid",
+        "userGroupAttribute": "memberOf",
+        "credentialsFile": "/etc/zot/ldap-credentials.json"
+      }
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": ["charlie"],
+              "groups": [
+                "admins",
+                "developers",
+                "cn=ldap-group,ou=Groups,dc=example,dc=org"
+              ],
+              "actions": ["read", "create", "update"]
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+## Metrics endpoint access
+
+Control which users can scrape the Prometheus `/metrics` endpoint:
+
+```json
+{
+  "http": {
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      }
+    },
+    "accessControl": {
+      "metrics": {
+        "users": ["prometheus"]
+      },
+      "repositories": {
+        "**": {
+          "anonymousPolicy": ["read"],
+          "defaultPolicy": ["read", "create"]
+        }
+      }
+    }
+  },
+  "extensions": {
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    }
+  }
+}
+```
+
+<ParamField path="http.accessControl.metrics.users" type="string[]">
+  Usernames allowed to access the metrics endpoint. If this list is empty and the metrics extension is enabled, the endpoint is accessible to anyone who can reach it.
+</ParamField>
+
+## Repository pattern matching
+
+Repository patterns support two wildcard styles:
+
+| Pattern | Matches |
+|---------|---------|
+| `**` | Any repository, including nested paths |
+| `tmp/**` | Any repository under the `tmp/` prefix |
+| `infra/*` | Repositories exactly one level under `infra/` |
+| `repos2/repo` | Exactly the repository `repos2/repo` |
+
+zot evaluates patterns from most specific to least specific. A repository like `infra/platform/k8s` would match `infra/*` before `**`.
+
+<Tip>
+  Use `**` as a catch-all default policy at the bottom of your repositories list to ensure every repository has a baseline access level.
+</Tip>

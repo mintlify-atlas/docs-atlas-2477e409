@@ -1,0 +1,705 @@
+---
+title: "Authentication"
+description: "Configure authentication for zot: htpasswd, LDAP, OpenID Connect (Google, GitHub, GitLab, OIDC), mutual TLS, and Bearer token authentication."
+---
+
+Authentication in zot is configured inside the `http.auth` block. You can enable one or more authentication methods simultaneously. When multiple methods are configured, zot tries them in order and grants access if any method succeeds.
+
+<Note>
+  zot can run with no authentication at all. Omitting `http.auth` entirely allows anonymous access to all endpoints. To restrict access to anonymous users while still requiring no credentials, use the `accessControl.repositories[*].anonymousPolicy` field described in [Authorization](/configuration/authorization).
+</Note>
+
+## Authentication methods overview
+
+<CardGroup cols={2}>
+  <Card title="htpasswd" icon="file-lines">
+    Static username/password file. Simple to set up, no external dependencies.
+  </Card>
+  <Card title="LDAP" icon="network-wired">
+    Authenticate against an existing LDAP or Active Directory server.
+  </Card>
+  <Card title="OpenID Connect" icon="globe">
+    Delegate to Google, GitHub, GitLab, or any OIDC-compliant provider.
+  </Card>
+  <Card title="mTLS" icon="shield">
+    Client certificate authentication using mutual TLS.
+  </Card>
+  <Card title="Bearer tokens" icon="key">
+    Token-based auth for CI/CD systems and Docker Registry v2 token services.
+  </Card>
+  <Card title="API keys" icon="hashtag">
+    Long-lived API keys for service accounts and automation.
+  </Card>
+</CardGroup>
+
+## Common fields
+
+<ParamField path="http.auth.failDelay" type="number" default="0">
+  Number of seconds to delay the response after a failed authentication attempt. Slows down brute-force attacks. Recommended value: `5`.
+</ParamField>
+
+## htpasswd
+
+htpasswd provides static username/password authentication using an Apache-compatible htpasswd file. Passwords must be bcrypt-hashed.
+
+Generate an htpasswd file:
+
+```bash
+htpasswd -cB /etc/zot/htpasswd admin
+```
+
+Add additional users:
+
+```bash
+htpasswd -B /etc/zot/htpasswd alice
+```
+
+Configure zot to use the file:
+
+```json
+{
+  "http": {
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      },
+      "failDelay": 5
+    }
+  }
+}
+```
+
+<ParamField path="http.auth.htpasswd.path" type="string" required>
+  Absolute path to the htpasswd file. zot watches this file for changes and reloads it without a restart.
+</ParamField>
+
+## LDAP
+
+LDAP authentication binds against an LDAP server using the user's credentials. zot searches the directory to locate the user's DN, then attempts a bind with the provided password.
+
+<Tabs>
+  <Tab title="Basic LDAP">
+    ```json
+    {
+      "http": {
+        "realm": "zot",
+        "tls": {
+          "cert": "/etc/zot/server.crt",
+          "key": "/etc/zot/server.key"
+        },
+        "auth": {
+          "ldap": {
+            "credentialsFile": "/etc/zot/ldap-credentials.json",
+            "address": "ldap.example.org",
+            "port": 389,
+            "startTLS": false,
+            "baseDN": "ou=Users,dc=example,dc=org",
+            "userAttribute": "uid",
+            "userFilter": "(!(nsaccountlock=TRUE))",
+            "userGroupAttribute": "memberOf",
+            "skipVerify": false,
+            "subtreeSearch": true
+          },
+          "failDelay": 5
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="LDAP with StartTLS">
+    ```json
+    {
+      "http": {
+        "auth": {
+          "ldap": {
+            "address": "ldap.example.org",
+            "port": 389,
+            "startTLS": true,
+            "skipVerify": false,
+            "baseDN": "ou=Users,dc=example,dc=org",
+            "userAttribute": "uid",
+            "subtreeSearch": true,
+            "credentialsFile": "/etc/zot/ldap-credentials.json"
+          },
+          "failDelay": 5
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### LDAP credentials file
+
+The credentials file stores the bind DN and password used to search the directory. It should not be world-readable.
+
+```json
+{
+  "bindDN": "cn=readonly,dc=example,dc=org",
+  "bindPassword": "s3cr3t"
+}
+```
+
+### LDAP configuration fields
+
+<ParamField path="http.auth.ldap.address" type="string" required>
+  Hostname or IP address of the LDAP server.
+</ParamField>
+
+<ParamField path="http.auth.ldap.port" type="number" default="389">
+  TCP port of the LDAP server. Use `636` for LDAPS.
+</ParamField>
+
+<ParamField path="http.auth.ldap.startTLS" type="boolean" default="false">
+  Upgrade the connection to TLS using the STARTTLS mechanism after connecting on the plain port. Mutually exclusive with using port 636 for direct TLS (LDAPS).
+</ParamField>
+
+<ParamField path="http.auth.ldap.insecure" type="boolean" default="false">
+  Connect without TLS. Use only in trusted networks or for testing.
+</ParamField>
+
+<ParamField path="http.auth.ldap.skipVerify" type="boolean" default="false">
+  Skip TLS certificate verification. Not recommended for production.
+</ParamField>
+
+<ParamField path="http.auth.ldap.baseDN" type="string" required>
+  The base distinguished name from which to search for users. Example: `"ou=Users,dc=example,dc=org"`.
+</ParamField>
+
+<ParamField path="http.auth.ldap.userAttribute" type="string" required>
+  LDAP attribute that contains the username. Typically `"uid"` for OpenLDAP or `"sAMAccountName"` for Active Directory.
+</ParamField>
+
+<ParamField path="http.auth.ldap.userFilter" type="string">
+  Additional LDAP filter to apply when searching for users. Example: `"(!(nsaccountlock=TRUE))"` to exclude locked accounts.
+</ParamField>
+
+<ParamField path="http.auth.ldap.userGroupAttribute" type="string">
+  LDAP attribute on the user object that lists the user's groups. Example: `"memberOf"`. The values of this attribute are passed through to zot's authorization engine, so you can use LDAP group DNs directly in `accessControl` policies.
+</ParamField>
+
+<ParamField path="http.auth.ldap.subtreeSearch" type="boolean" default="false">
+  Search the entire subtree under `baseDN`. When `false`, only searches one level.
+</ParamField>
+
+<ParamField path="http.auth.ldap.credentialsFile" type="string">
+  Path to a JSON file containing `bindDN` and `bindPassword`. Use this instead of embedding credentials in the main config.
+</ParamField>
+
+<ParamField path="http.auth.ldap.caCert" type="string">
+  Path to a PEM-encoded CA certificate to verify the LDAP server's TLS certificate.
+</ParamField>
+
+## OpenID Connect
+
+OpenID Connect lets your users authenticate through external identity providers. zot supports Google, GitHub, GitLab, and any standards-compliant OIDC provider (configured as `"oidc"`).
+
+<Note>
+  OpenID Connect requires `http.externalUrl` to be set so zot can construct redirect URIs. Session storage also requires `sessionKeysFile`.
+</Note>
+
+<Tabs>
+  <Tab title="Google">
+    ```json
+    {
+      "http": {
+        "externalUrl": "https://registry.example.com",
+        "auth": {
+          "sessionKeysFile": "/etc/zot/session-keys.json",
+          "openid": {
+            "providers": {
+              "google": {
+                "credentialsFile": "/etc/zot/google-credentials.json",
+                "issuer": "https://accounts.google.com",
+                "scopes": ["openid", "email"]
+              }
+            }
+          },
+          "failDelay": 5
+        }
+      }
+    }
+    ```
+
+    The Google credentials file must contain `clientID` and `clientSecret` obtained from the Google Cloud Console:
+
+    ```json
+    {
+      "clientID": "1234567890-xxxx.apps.googleusercontent.com",
+      "clientSecret": "GOCSPX-..."
+    }
+    ```
+  </Tab>
+  <Tab title="GitHub">
+    ```json
+    {
+      "http": {
+        "externalUrl": "https://registry.example.com",
+        "auth": {
+          "sessionKeysFile": "/etc/zot/session-keys.json",
+          "openid": {
+            "providers": {
+              "github": {
+                "credentialsFile": "/etc/zot/github-credentials.json",
+                "scopes": ["read:org", "user", "repo"]
+              }
+            }
+          },
+          "failDelay": 5
+        }
+      }
+    }
+    ```
+
+    <Info>
+      GitHub uses OAuth2, not OpenID Connect. The `issuer` field is not required for GitHub. Scopes control which GitHub resources the token can access.
+    </Info>
+  </Tab>
+  <Tab title="GitLab">
+    ```json
+    {
+      "http": {
+        "externalUrl": "https://registry.example.com",
+        "auth": {
+          "sessionKeysFile": "/etc/zot/session-keys.json",
+          "openid": {
+            "providers": {
+              "gitlab": {
+                "issuer": "https://gitlab.com",
+                "credentialsFile": "/etc/zot/gitlab-credentials.json",
+                "scopes": ["openid", "read_api", "read_user", "profile", "email"]
+              }
+            }
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Generic OIDC">
+    ```json
+    {
+      "http": {
+        "externalUrl": "https://registry.example.com",
+        "auth": {
+          "sessionKeysFile": "/etc/zot/session-keys.json",
+          "openid": {
+            "providers": {
+              "oidc": {
+                "name": "Corporate SSO",
+                "issuer": "https://sso.example.com/dex",
+                "credentialsFile": "/etc/zot/oidc-credentials.json",
+                "scopes": ["openid", "email", "groups"]
+              }
+            }
+          }
+        }
+      }
+    }
+    ```
+
+    The generic `oidc` provider works with any OpenID Connect compliant server such as Dex, Keycloak, Zitadel, Auth0, or Okta.
+  </Tab>
+  <Tab title="Multiple providers">
+    ```json
+    {
+      "http": {
+        "externalUrl": "http://127.0.0.1:8080",
+        "auth": {
+          "htpasswd": { "path": "test/data/htpasswd" },
+          "sessionKeysFile": "/etc/zot/session-keys.json",
+          "apikey": true,
+          "openid": {
+            "callbackAllowOrigins": ["http://127.0.0.1:3000"],
+            "providers": {
+              "github": {
+                "credentialsFile": "/etc/zot/github-credentials.json",
+                "scopes": ["read:org", "user", "repo"]
+              },
+              "google": {
+                "credentialsFile": "/etc/zot/google-credentials.json",
+                "issuer": "https://accounts.google.com",
+                "scopes": ["openid", "email"]
+              },
+              "gitlab": {
+                "issuer": "https://gitlab.com",
+                "credentialsFile": "/etc/zot/gitlab-credentials.json",
+                "scopes": ["openid", "read_api", "read_user", "profile", "email"]
+              },
+              "oidc": {
+                "name": "Corporate SSO",
+                "issuer": "http://127.0.0.1:5556/dex",
+                "credentialsFile": "/etc/zot/oidc-credentials.json",
+                "scopes": ["openid", "user", "email", "groups"]
+              }
+            }
+          },
+          "failDelay": 5
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+### Session keys file
+
+OpenID Connect uses encrypted cookies to store session state. The session keys file contains the HMAC and encryption keys:
+
+```json
+{
+  "hashKey": "a-32-byte-random-string-goes-here",
+  "encryptKey": "a-32-byte-encryption-key-goes-here"
+}
+```
+
+Generate secure keys:
+
+```bash
+openssl rand -hex 32
+```
+
+### OpenID provider configuration fields
+
+<ParamField path="openid.providers.[name].credentialsFile" type="string">
+  Path to a JSON file with `clientID` and `clientSecret`. Preferred over embedding secrets in the config.
+</ParamField>
+
+<ParamField path="openid.providers.[name].clientID" type="string">
+  OAuth2/OIDC client ID. Can be specified directly instead of using `credentialsFile`.
+</ParamField>
+
+<ParamField path="openid.providers.[name].clientSecret" type="string">
+  OAuth2/OIDC client secret. Can be specified directly instead of using `credentialsFile`.
+</ParamField>
+
+<ParamField path="openid.providers.[name].issuer" type="string">
+  OIDC issuer URL. zot fetches the provider's discovery document from `{issuer}/.well-known/openid-configuration`. Required for all providers except GitHub.
+</ParamField>
+
+<ParamField path="openid.providers.[name].scopes" type="string[]">
+  OAuth2 scopes to request. At minimum, include `"openid"` for OIDC providers.
+</ParamField>
+
+<ParamField path="openid.providers.[name].name" type="string">
+  Human-readable display name shown in the login UI. Useful for the generic `oidc` provider.
+</ParamField>
+
+<ParamField path="openid.providers.[name].claimMapping.username" type="string" default="email">
+  Which OIDC claim to use as the zot username. Options include `"email"`, `"preferred_username"`, `"sub"`, `"name"`, or any custom claim. The chosen username is used in `accessControl` policies.
+
+  ```json
+  "claimMapping": {
+    "username": "preferred_username"
+  }
+  ```
+</ParamField>
+
+<ParamField path="openid.callbackAllowOrigins" type="string[]">
+  Absolute URL origins permitted as redirect targets after login (used when an external UI initiates the login flow). If empty, only same-origin redirects are allowed.
+</ParamField>
+
+### API keys
+
+When `apikey: true` is set alongside OpenID Connect, users can generate long-lived API keys from the zot web UI. These keys work as passwords in HTTP Basic authentication and are useful for CI/CD pipelines.
+
+```json
+{
+  "http": {
+    "auth": {
+      "sessionKeysFile": "/etc/zot/session-keys.json",
+      "apikey": true,
+      "openid": { ... }
+    }
+  }
+}
+```
+
+## Mutual TLS (mTLS)
+
+mTLS authenticates clients using X.509 certificates. zot extracts the client's identity from the certificate's Subject Alternative Names (SANs) or Common Name.
+
+<Steps>
+  <Step title="Configure TLS with a CA certificate">
+    Set `tls.cacert` to the CA certificate that signed client certificates. This enables mutual TLS at the TLS layer.
+
+    ```json
+    {
+      "http": {
+        "tls": {
+          "cert": "/etc/zot/server.crt",
+          "key": "/etc/zot/server.key",
+          "cacert": "/etc/zot/client-ca.crt"
+        }
+      }
+    }
+    ```
+  </Step>
+  <Step title="Configure the mTLS identity extraction">
+    Add `http.auth.mtls` to specify how the client identity is extracted from the certificate:
+
+    ```json
+    {
+      "http": {
+        "tls": {
+          "cert": "/etc/zot/server.crt",
+          "key": "/etc/zot/server.key",
+          "cacert": "/etc/zot/client-ca.crt"
+        },
+        "auth": {
+          "mtls": {
+            "identityAttributes": ["CommonName"]
+          }
+        }
+      }
+    }
+    ```
+  </Step>
+  <Step title="Add the identity to access control">
+    The extracted identity is used as the username in `accessControl` policies:
+
+    ```json
+    {
+      "http": {
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "policies": [{
+                "users": ["clientuser"],
+                "actions": ["read", "create"]
+              }],
+              "defaultPolicy": ["read"]
+            }
+          }
+        }
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+### mTLS with SPIFFE/SVID
+
+For workload identity using SPIFFE URIs, configure the `identityAttributes` and `uriSanPattern`:
+
+```json
+{
+  "http": {
+    "tls": {
+      "cert": "/etc/zot/server.crt",
+      "key": "/etc/zot/server.key",
+      "cacert": "/etc/zot/ca.crt"
+    },
+    "auth": {
+      "mtls": {
+        "identityAttributes": ["URI", "CommonName"],
+        "uriSanPattern": "spiffe://example.org/workload/(.*)"
+      }
+    }
+  }
+}
+```
+
+The `uriSanPattern` regex extracts the identity from the URI SAN. The capture group `(.*)` defines the username that appears in access control policies.
+
+### mTLS configuration fields
+
+<ParamField path="http.auth.mtls.identityAttributes" type="string[]" default='["CommonName"]'>
+  Ordered list of certificate attributes to try when extracting the client identity. zot tries each attribute in order and uses the first one that contains a value.
+
+  Supported values:
+  - `"CommonName"` — certificate Subject Common Name
+  - `"Subject"` — full Subject distinguished name
+  - `"Email"` — email SAN
+  - `"URI"` — URI SAN (use with `uriSanPattern` for SPIFFE)
+  - `"DNSName"` — DNS SAN
+</ParamField>
+
+<ParamField path="http.auth.mtls.uriSanPattern" type="string">
+  Regular expression applied to URI SANs. The first capture group becomes the identity. Only used when `"URI"` is in `identityAttributes`.
+</ParamField>
+
+<ParamField path="http.auth.mtls.uriSanIndex" type="number" default="0">
+  Which URI SAN to use when the certificate has multiple URI SANs (zero-based index).
+</ParamField>
+
+<ParamField path="http.auth.mtls.dnsSanIndex" type="number" default="0">
+  Which DNS SAN to use when the certificate has multiple DNS SANs (zero-based index).
+</ParamField>
+
+<ParamField path="http.auth.mtls.emailSanIndex" type="number" default="0">
+  Which email SAN to use when the certificate has multiple email SANs (zero-based index).
+</ParamField>
+
+## Bearer tokens
+
+Bearer token authentication implements the Docker Registry v2 token protocol. zot validates JWT bearer tokens signed by an external token service.
+
+<Tabs>
+  <Tab title="Static certificate">
+    ```json
+    {
+      "http": {
+        "auth": {
+          "bearer": {
+            "realm": "https://auth.myreg.io/auth/token",
+            "service": "myauth",
+            "cert": "/etc/zot/auth.crt"
+          }
+        }
+      }
+    }
+    ```
+
+    <ParamField path="http.auth.bearer.realm" type="string" required>
+      URL of the token endpoint. Returned to unauthenticated clients in `WWW-Authenticate` headers so they know where to get a token.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.service" type="string" required>
+      Service name included in the `WWW-Authenticate` challenge, matching the `service` field in tokens issued by the token server.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.cert" type="string">
+      Path to the PEM-encoded public key or certificate used to verify token signatures. The token server must sign tokens with the corresponding private key.
+    </ParamField>
+  </Tab>
+  <Tab title="OIDC workload identity">
+    OIDC workload identity lets Kubernetes pods and other workloads authenticate using their OIDC service account tokens without any static credentials:
+
+    ```json
+    {
+      "http": {
+        "auth": {
+          "bearer": {
+            "realm": "zot",
+            "service": "zot-service",
+            "oidc": [
+              {
+                "issuer": "https://kubernetes.default.svc.cluster.local",
+                "audiences": ["zot", "https://zot.example.com"],
+                "claimMapping": {
+                  "username": "claims.sub"
+                }
+              }
+            ]
+          }
+        },
+        "accessControl": {
+          "repositories": {
+            "**": {
+              "policies": [
+                {
+                  "users": ["system:serviceaccount:flux-system:source-controller"],
+                  "actions": ["read", "create", "update", "delete"]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+    ```
+
+    <ParamField path="http.auth.bearer.oidc[].issuer" type="string" required>
+      OIDC issuer URL. zot fetches the JWKS from `{issuer}/.well-known/openid-configuration` to validate token signatures.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.oidc[].audiences" type="string[]" required>
+      List of acceptable `aud` claim values. The token must contain at least one matching audience.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.oidc[].claimMapping.username" type="string" default='"claims.iss + \"/\" + claims.sub"'>
+      CEL expression that produces the username from OIDC claims. Common values: `"claims.sub"`, `"claims.email"`.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.oidc[].certificateAuthorityFile" type="string">
+      Path to a CA certificate file to validate the OIDC provider's TLS certificate.
+    </ParamField>
+  </Tab>
+  <Tab title="AWS Secrets Manager">
+    Retrieve the JWT verification key dynamically from AWS Secrets Manager:
+
+    ```json
+    {
+      "http": {
+        "auth": {
+          "bearer": {
+            "realm": "https://auth.myreg.io/auth/token",
+            "service": "myauth",
+            "awsSecretsManager": {
+              "region": "us-east-1",
+              "secretName": "zot/bearer-auth-cert",
+              "refreshInterval": "1h"
+            }
+          }
+        }
+      }
+    }
+    ```
+
+    <ParamField path="http.auth.bearer.awsSecretsManager.region" type="string" required>
+      AWS region where the secret is stored.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.awsSecretsManager.secretName" type="string" required>
+      Name of the secret in AWS Secrets Manager. The secret value must be a JSON object where each key is a key ID and each value is the PEM-encoded public key.
+    </ParamField>
+
+    <ParamField path="http.auth.bearer.awsSecretsManager.refreshInterval" type="string" default="1m">
+      How often to refresh the key from Secrets Manager.
+    </ParamField>
+  </Tab>
+</Tabs>
+
+## TLS configuration
+
+TLS is configured at the `http.tls` level and applies to all authentication methods. When `tls` is set, all HTTP traffic is automatically upgraded to HTTPS.
+
+```json
+{
+  "http": {
+    "tls": {
+      "cert": "/etc/zot/server.crt",
+      "key": "/etc/zot/server.key"
+    }
+  }
+}
+```
+
+<ParamField path="http.tls.cert" type="string" required>
+  Path to the PEM-encoded TLS certificate file.
+</ParamField>
+
+<ParamField path="http.tls.key" type="string" required>
+  Path to the PEM-encoded TLS private key file.
+</ParamField>
+
+<ParamField path="http.tls.cacert" type="string">
+  Path to the PEM-encoded CA certificate used to verify client certificates. Setting this field enables mutual TLS—clients must present a valid certificate signed by this CA.
+</ParamField>
+
+<Tip>
+  When TLS is configured, session cookies are automatically set with the `Secure` flag. You do not need to set `http.auth.secureSession` manually.
+</Tip>
+
+## Anonymous access
+
+To allow unauthenticated clients to pull images without configuring any auth method, omit `http.auth` entirely:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/zot"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  }
+}
+```
+
+To combine authentication with anonymous read access for specific repositories, configure `accessControl.repositories[path].anonymousPolicy`. See [Authorization](/configuration/authorization) for details.

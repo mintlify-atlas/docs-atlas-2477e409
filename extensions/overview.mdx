@@ -1,0 +1,110 @@
+---
+title: "Extensions overview"
+description: "zot uses build-time extensions to add optional functionality. Learn which extensions are available and how to enable them."
+keywords: ["extensions", "build tags", "sync", "search", "metrics", "imagetrust", "scrub", "lint", "ui"]
+---
+
+zot extensions are optional features compiled into the binary at build time using Go build tags. Only the extensions present in a binary are available at runtime—there is no dynamic loading. This keeps the core registry small and the attack surface minimal.
+
+The extensions key in the configuration file activates whichever extensions are present in the binary. If an extension is not compiled in, its configuration block is silently ignored.
+
+## Available extensions
+
+| Extension | Build tag | Description |
+|-----------|-----------|-------------|
+| `sync` | `sync` | Mirror images from upstream registries on demand or on a schedule |
+| `search` | `search` | GraphQL search API and CVE vulnerability scanning with Trivy |
+| `metrics` | `metrics` | Prometheus metrics endpoint |
+| `scrub` | `scrub` | Periodic integrity checks of the storage layer |
+| `lint` | (included with search) | Enforce mandatory OCI annotations on push |
+| `ui` | `ui` | Embedded web UI for browsing the registry |
+| `mgmt` | `mgmt` | Management API for server configuration |
+| `userprefs` | (requires search + ui) | Per-user preferences: starred and bookmarked repositories |
+| `imagetrust` | `imagetrust` | Signature verification with Cosign and Notation |
+
+<Note>
+When building with multiple extensions, the build tags must appear in this order: `sync`, `search`, `scrub`, `metrics`, `lint`, `ui`, `mgmt`, `userprefs`, `imagetrust`. This order is enforced by the zot Makefile.
+</Note>
+
+## Build tags
+
+Each extension corresponds to a Go build tag. To build zot with specific extensions, pass the tags to `go build`:
+
+```bash
+# Build with sync and search
+go build -tags "sync search" -o zot ./cmd/zot
+
+# Build with all extensions
+go build -tags "sync search scrub metrics lint ui mgmt userprefs imagetrust" -o zot ./cmd/zot
+```
+
+When a file is only valid when a particular extension is compiled in, it begins with a build constraint:
+
+```go
+//go:build sync
+
+package extensions
+```
+
+Each extension also ships a corresponding disabled stub file (e.g., `extension-sync-disabled.go`) with the inverse build tag (`!sync`). These stubs define the same function signatures but with no-op bodies, so the package always compiles cleanly.
+
+## Standard binaries
+
+The zot project publishes two pre-built binaries:
+
+| Binary | Extensions included |
+|--------|-------------------|
+| `zot` (full) | All extensions: `sync search scrub metrics lint ui mgmt userprefs imagetrust` |
+| `zot-minimal` | No extensions |
+
+Use the minimal binary for environments where you only need the OCI Distribution Specification API, or when you want to add only specific extensions by building from source.
+
+## Enabling extensions in config
+
+Extensions are configured under the top-level `extensions` key. Most extensions require setting `"enable": true`. If the `extensions` key is absent, no extensions are active.
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": { "rootDirectory": "/var/lib/zot" },
+  "http": { "address": "0.0.0.0", "port": "5000" },
+  "log": { "level": "info" },
+  "extensions": {
+    "search": {
+      "enable": true,
+      "cve": {
+        "updateInterval": "2h"
+      }
+    },
+    "metrics": {
+      "enable": true,
+      "prometheus": {
+        "path": "/metrics"
+      }
+    },
+    "scrub": {
+      "enable": true,
+      "interval": "24h"
+    }
+  }
+}
+```
+
+The `sync` extension is implicitly enabled when at least one registry is listed under `extensions.sync.registries`, even without `"enable": true`.
+
+## Extension reference
+
+<CardGroup cols={2}>
+  <Card title="Registry sync" icon="arrows-rotate" href="/extensions/sync">
+    Mirror images from upstream registries on demand or on a poll interval. Supports TLS, credentials, tag filtering, and content prefix mapping.
+  </Card>
+  <Card title="Search and CVE scanning" icon="magnifying-glass" href="/extensions/search">
+    GraphQL API for querying images, repositories, and vulnerability data. Integrates with Trivy for CVE scanning.
+  </Card>
+  <Card title="Metrics" icon="chart-line" href="/extensions/metrics">
+    Prometheus-compatible metrics endpoint for HTTP request rates, latency, storage usage, and scheduler status.
+  </Card>
+  <Card title="Image trust" icon="shield-check" href="/extensions/image-trust">
+    Verify image signatures using Cosign and Notation. Upload public keys and certificates via the REST API.
+  </Card>
+</CardGroup>

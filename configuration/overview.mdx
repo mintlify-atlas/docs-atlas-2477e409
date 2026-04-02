@@ -1,0 +1,191 @@
+---
+title: "Configuration overview"
+description: "Learn how zot uses a single configuration file to control all aspects of the registry, including storage, networking, authentication, and extensions."
+---
+
+zot is configured through a single JSON or YAML file passed at startup. Every aspect of the registry—storage backends, HTTP settings, authentication, authorization, logging, and optional extensions—lives in this one file. There is no database-backed configuration; the file is the source of truth.
+
+## Starting zot with a config file
+
+```bash
+zot serve /path/to/config.json
+```
+
+Both JSON and YAML formats are fully supported:
+
+```bash
+zot serve /path/to/config.yaml
+```
+
+## Top-level structure
+
+The configuration file maps directly to the `Config` struct in zot. Every key at the top level corresponds to a major subsystem:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": { ... },
+  "http": { ... },
+  "log": { ... },
+  "extensions": { ... },
+  "scheduler": { ... },
+  "cluster": { ... }
+}
+```
+
+## Minimal configuration
+
+The following is the smallest valid zot configuration. It starts a registry on `127.0.0.1:8080` with local storage and no authentication:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/tmp/zot"
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "8080"
+  },
+  "log": {
+    "level": "debug"
+  }
+}
+```
+
+The equivalent YAML:
+
+```yaml
+distSpecVersion: "1.1.1"
+storage:
+  rootDirectory: /tmp/zot
+http:
+  address: 127.0.0.1
+  port: "8080"
+log:
+  level: debug
+```
+
+## Top-level fields
+
+<ParamField path="distSpecVersion" type="string" required>
+  The OCI Distribution Specification version this registry conforms to. Use `"1.1.1"` for current releases. This value is validated at startup and returned in API responses.
+</ParamField>
+
+<ParamField path="storage" type="object" required>
+  Controls where and how image data is stored. Supports local filesystem, Amazon S3, and Google Cloud Storage. See [Storage configuration](/configuration/storage) for full details.
+</ParamField>
+
+<ParamField path="http" type="object" required>
+  Configures the HTTP server: bind address, port, TLS, authentication, authorization, and rate limiting.
+</ParamField>
+
+<ParamField path="log" type="object">
+  Controls log level and output destinations. Defaults to `debug` level logging to stdout.
+</ParamField>
+
+<ParamField path="extensions" type="object">
+  Enables optional registry features: search, UI, sync, vulnerability scanning, metrics, and event recording. Omit this key to run a minimal registry without any extensions.
+</ParamField>
+
+<ParamField path="scheduler" type="object">
+  Configures the background task scheduler worker pool.
+
+  ```json
+  "scheduler": {
+    "numWorkers": 5
+  }
+  ```
+</ParamField>
+
+<ParamField path="cluster" type="object">
+  Scale-out cluster configuration for running multiple zot instances behind a shared load balancer. Requires all members to share the same storage backend.
+</ParamField>
+
+## The `http` section
+
+The `http` object controls the network interface and all security settings:
+
+<ParamField path="http.address" type="string" default="127.0.0.1">
+  IP address to bind. Use `"0.0.0.0"` to listen on all interfaces.
+</ParamField>
+
+<ParamField path="http.port" type="string" default="8080">
+  TCP port to listen on.
+</ParamField>
+
+<ParamField path="http.externalUrl" type="string">
+  The public-facing URL of the registry. Required when using OpenID Connect so that redirect URIs can be constructed correctly.
+</ParamField>
+
+<ParamField path="http.realm" type="string" default="zot">
+  The authentication realm presented to clients in `WWW-Authenticate` challenge headers.
+</ParamField>
+
+<ParamField path="http.tls" type="object">
+  TLS configuration. When set, the server serves HTTPS. See [Authentication](/configuration/authentication) for mTLS details.
+
+  ```json
+  "tls": {
+    "cert": "/etc/zot/server.crt",
+    "key": "/etc/zot/server.key",
+    "cacert": "/etc/zot/ca.crt"
+  }
+  ```
+</ParamField>
+
+<ParamField path="http.auth" type="object">
+  Authentication methods (htpasswd, LDAP, OpenID Connect, mTLS, Bearer tokens). See [Authentication](/configuration/authentication).
+</ParamField>
+
+<ParamField path="http.accessControl" type="object">
+  Role-based access control policies for repositories. See [Authorization](/configuration/authorization).
+</ParamField>
+
+<ParamField path="http.allowOrigin" type="string">
+  Comma-separated list of origins allowed in CORS requests.
+</ParamField>
+
+<ParamField path="http.ratelimit" type="object">
+  Per-second request rate limiting, optionally per HTTP method.
+
+  ```json
+  "ratelimit": {
+    "rate": 10,
+    "methods": [
+      { "method": "GET", "rate": 5 }
+    ]
+  }
+  ```
+</ParamField>
+
+## The `log` section
+
+<ParamField path="log.level" type="string" default="debug">
+  Minimum log severity. Accepted values: `"panic"`, `"fatal"`, `"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`.
+</ParamField>
+
+<ParamField path="log.output" type="string">
+  File path for structured JSON log output. If omitted, logs go to stdout.
+</ParamField>
+
+<ParamField path="log.audit" type="string">
+  File path for the audit log. The audit log records every mutating operation (push, delete) with the authenticated identity, making it useful for compliance and forensics.
+</ParamField>
+
+## Configuration sections
+
+<CardGroup cols={2}>
+  <Card title="Storage" icon="hard-drive" href="/configuration/storage">
+    Local filesystem, S3, GCS, deduplication, garbage collection, and image retention policies.
+  </Card>
+  <Card title="Authentication" icon="lock" href="/configuration/authentication">
+    htpasswd, LDAP, OpenID Connect, mTLS, and Bearer token authentication.
+  </Card>
+  <Card title="Authorization" icon="shield" href="/configuration/authorization">
+    Repository policies, groups, admin access, and anonymous access control.
+  </Card>
+  <Card title="Extensions" icon="puzzle-piece" href="/extensions/overview">
+    Search, UI, sync, vulnerability scanning, metrics, and event recording.
+  </Card>
+</CardGroup>

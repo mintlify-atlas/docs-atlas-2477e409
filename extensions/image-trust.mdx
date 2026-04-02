@@ -1,0 +1,264 @@
+---
+title: "Image trust"
+description: "Verify image signatures using Cosign and Notation. Upload public keys and certificates through the REST API and let zot validate signatures automatically."
+keywords: ["image trust", "Cosign", "Notation", "signature verification", "signing", "supply chain security"]
+---
+
+The image trust extension lets zot verify OCI image signatures. It supports two signing ecosystems:
+
+- **Cosign** (from the Sigstore project): uses public key cryptography to verify signatures attached as OCI artifacts.
+- **Notation** (from the Notary project): uses X.509 certificates and trust policies to verify JWS envelope signatures.
+
+Once enabled, zot runs a background task every two hours to re-evaluate signature validity for all images in the registry. Verification results are exposed through the [search GraphQL API](/extensions/search) in the `IsSigned` and `SignatureInfo` fields.
+
+## Enabling image trust
+
+The image trust extension is compiled in using the `imagetrust` build tag. Enable it in the configuration file:
+
+```json
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/var/lib/zot"
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000"
+  },
+  "log": {
+    "level": "info"
+  },
+  "extensions": {
+    "trust": {
+      "enable": true,
+      "cosign": true,
+      "notation": true
+    }
+  }
+}
+```
+
+<ParamField path="extensions.trust.enable" type="boolean" required>
+  Set to `true` to activate the image trust extension. Setting this to `false` disables the extension even if Cosign or Notation are set to `true`.
+</ParamField>
+
+<ParamField path="extensions.trust.cosign" type="boolean" default="false">
+  Enable Cosign signature verification. When `true`, the `/v2/_zot/ext/cosign` endpoint accepts public key uploads and verifies Cosign signatures.
+</ParamField>
+
+<ParamField path="extensions.trust.notation" type="boolean" default="false">
+  Enable Notation signature verification. When `true`, the `/v2/_zot/ext/notation` endpoint accepts certificate uploads and verifies Notation signatures.
+</ParamField>
+
+## How verification works
+
+zot stores uploaded public keys and certificates on disk alongside image data (or in AWS Secrets Manager for cloud deployments). The verification background task runs every two hours and checks all signatures against the stored keys and certificates, recording the result in the metadata database.
+
+Verification results for each image are exposed through the search GraphQL API:
+
+```graphql
+{
+  Image(image: "myapp:v1.0.0") {
+    IsSigned
+    SignatureInfo {
+      Tool
+      IsTrusted
+      Author
+    }
+  }
+}
+```
+
+The `Tool` field is either `cosign` or `notation`. `IsTrusted` is `true` only if the signature was verified against a key or certificate that you uploaded. `Author` contains the public key content (Cosign) or the certificate subject DN (Notation).
+
+## Cosign
+
+### Uploading a public key
+
+Only admin users can upload public keys. The upload endpoint accepts a raw PEM-encoded public key:
+
+```bash
+curl -X POST http://localhost:5000/v2/_zot/ext/cosign \
+  --data-binary @cosign.pub \
+  -u admin:password
+```
+
+The public key is stored under `{rootDirectory}/_cosign/` using its content digest as the filename. Uploading the same key twice is a no-op.
+
+### Signing an image with Cosign
+
+<Steps>
+  <Step title="Generate a key pair">
+    ```bash
+    cosign generate-key-pair
+    ```
+    This creates `cosign.key` (private key) and `cosign.pub` (public key).
+  </Step>
+  <Step title="Sign the image">
+    ```bash
+    cosign sign --key cosign.key localhost:5000/myapp:v1.0.0
+    ```
+  </Step>
+  <Step title="Upload the public key to zot">
+    ```bash
+    curl -X POST http://localhost:5000/v2/_zot/ext/cosign \
+      --data-binary @cosign.pub \
+      -u admin:password
+    ```
+  </Step>
+  <Step title="Verify the signature">
+    ```bash
+    cosign verify --key cosign.pub localhost:5000/myapp:v1.0.0
+    ```
+    zot also verifies signatures automatically in the background and records results in the metadata database.
+  </Step>
+</Steps>
+
+### Cosign API reference
+
+<ParamField path="POST /v2/_zot/ext/cosign" type="endpoint">
+  Upload a PEM-encoded Cosign public key. The request body must be the raw public key content (`application/octet-stream`). Returns `200` on success, `400` if the key is not a valid PEM-encoded public key, `500` on storage errors. Only admin users can call this endpoint.
+</ParamField>
+
+## Notation
+
+### Uploading a certificate
+
+Only admin users can upload certificates. The upload endpoint accepts PEM or DER encoded X.509 certificates:
+
+```bash
+curl -X POST "http://localhost:5000/v2/_zot/ext/notation?truststoreType=ca" \
+  --data-binary @cert.pem \
+  -u admin:password
+```
+
+The `truststoreType` query parameter specifies the trust store type. Accepted values: `ca`, `signingAuthority`, `tsa`. Defaults to `ca` when omitted.
+
+Certificates are stored at `{rootDirectory}/_notation/truststore/x509/{type}/default/` using the certificate's content digest as the filename.
+
+### Trust policy
+
+zot automatically initializes a Notation trust policy at startup. The default policy uses strict signature verification and trusts all identities (`"*"`):
+
+```json
+{
+  "version": "1.0",
+  "trustPolicies": [
+    {
+      "name": "default-config",
+      "registryScopes": ["*"],
+      "signatureVerification": {
+        "level": "strict"
+      },
+      "trustStores": ["ca:default", "signingAuthority:default"],
+      "trustedIdentities": ["*"]
+    }
+  ]
+}
+```
+
+The `strict` verification level enforces all validations, including certificate expiry. If a certificate has expired, signatures verified against it are considered invalid even if the cryptographic check passes.
+
+### Signing an image with Notation
+
+<Steps>
+  <Step title="Generate a test certificate">
+    ```bash
+    notation cert generate-test \
+      --default \
+      "myapp.example.com"
+    ```
+  </Step>
+  <Step title="Sign the image">
+    ```bash
+    notation sign localhost:5000/myapp:v1.0.0
+    ```
+  </Step>
+  <Step title="Export the signing certificate">
+    ```bash
+    notation cert export \
+      --type ca \
+      --store myapp.example.com \
+      --output cert.pem
+    ```
+  </Step>
+  <Step title="Upload the certificate to zot">
+    ```bash
+    curl -X POST "http://localhost:5000/v2/_zot/ext/notation?truststoreType=ca" \
+      --data-binary @cert.pem \
+      -u admin:password
+    ```
+  </Step>
+  <Step title="Verify the signature">
+    ```bash
+    notation verify localhost:5000/myapp:v1.0.0
+    ```
+  </Step>
+</Steps>
+
+### Notation API reference
+
+<ParamField path="POST /v2/_zot/ext/notation" type="endpoint">
+  Upload an X.509 certificate (PEM or DER encoded). Use the `truststoreType` query parameter to specify the trust store: `ca` (default), `signingAuthority`, or `tsa`. Returns `200` on success, `400` if the certificate is invalid or the trust store type is unknown, `500` on storage errors. Only admin users can call this endpoint.
+</ParamField>
+
+## Cloud storage (AWS)
+
+When zot is configured with DynamoDB as the cache driver, image trust keys and certificates are stored in AWS Secrets Manager instead of the local filesystem. The region and endpoint are taken from the DynamoDB cache driver configuration:
+
+```json
+{
+  "storage": {
+    "remoteCache": true,
+    "cacheDriver": {
+      "name": "dynamodb",
+      "region": "us-east-1",
+      "endpoint": "https://dynamodb.us-east-1.amazonaws.com"
+    }
+  },
+  "extensions": {
+    "trust": {
+      "enable": true,
+      "cosign": true,
+      "notation": true
+    }
+  }
+}
+```
+
+Cosign public keys are stored as Secrets Manager secrets with the description `"cosign public key"`. Notation certificates are stored under paths like `ca/default/<digest>` with the description `"notation certificate"`.
+
+<Note>
+The AWS IAM role running zot must have permissions for `secretsmanager:CreateSecret`, `secretsmanager:DeleteSecret`, and `secretsmanager:ListSecrets`.
+</Note>
+
+## Checking signature status via GraphQL
+
+After uploading keys or certificates and waiting for the background verification task to run (or pushing an image), you can query signature status through the search API:
+
+```graphql
+{
+  ImageList(repo: "myapp") {
+    Results {
+      Tag
+      IsSigned
+      SignatureInfo {
+        Tool
+        IsTrusted
+        Author
+      }
+      Manifests {
+        Digest
+        IsSigned
+        SignatureInfo {
+          Tool
+          IsTrusted
+          Author
+        }
+      }
+    }
+  }
+}
+```
+
+`IsSigned` at the image level is `true` if at least one manifest has a signature. `IsTrusted` is `true` only when a valid key or certificate for the signature is present in the store.
